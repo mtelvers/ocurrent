@@ -79,6 +79,7 @@ let template t ?refresh contents =
             link ~rel:[ `Stylesheet ] ~href:"/css/normalize.css" ();
             link ~rel:[ `Stylesheet ] ~href:"/css/ansi.css" ();
             link ~rel:[ `Stylesheet ] ~href:"/css/style.css" ();
+            link ~rel:[ `Stylesheet ] ~href:"/css/gitlab.css" ();
             link ~rel:[ `Icon ] ~href:img_dashboard_logo ();
             meta ~a:[a_charset "UTF-8"] ();
           ] in
