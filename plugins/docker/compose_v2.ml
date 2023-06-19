@@ -44,12 +44,12 @@ end
 
 module Value = struct
   type t = {
-    image : Image.t;
+    images : Image.t list;
   }
 
-  let digest { image } =
+  let digest { images } =
     Yojson.Safe.to_string @@ `Assoc [
-      "image", `String (Image.hash image);
+      "image", `String (List.fold_left (fun acc image -> acc ^ (Image.hash image)) String.empty images);
     ]
 end
 
@@ -69,7 +69,7 @@ let with_context ~job context fn =
       fn dir
   | `Git commit -> Current_git.with_checkout ~job commit fn
 
-let publish { pull } job key { Value.image } =
+let publish { pull } job key { Value.images } =
   let { Key.commit; docker_context; docker_compose_file; detach; up_args; project_name; path } = key in
   Current.Job.start job ~level:Current.Level.Dangerous >>= fun () ->
   with_context ~job commit @@ fun dir ->
@@ -96,7 +96,6 @@ let publish { pull } job key { Value.image } =
 
 let pp f (key, value) =
   let { Key.commit = _; docker_context = _; docker_compose_file = _; path = _; detach = _; up_args = _; project_name } = key in
-  let { Value.image } = value in
-  Fmt.pf f "%s %s" project_name (Image.hash image)
+  Fmt.pf f "%s %s" project_name (Value.digest value)
 
 let auto_cancel = false

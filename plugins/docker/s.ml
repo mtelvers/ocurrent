@@ -118,10 +118,10 @@ module type DOCKER = sig
     ?detach:bool ->
     ?up_args:string list ->
     project_name:string ->
-    image:Image.t Current.t ->
+    images:Image.t Current.t list ->
     source ->
     unit Current.t
-  (** [compose_v2 ~name ~image ~contents ()] keeps a Docker Compose Cli deployment up-to-date.
+  (** [compose_v2 ~name ~images ~contents ()] keeps a Docker Compose Cli deployment up-to-date.
       [contents] contains the full Compose Yaml file.
       [up_args] contains additional arguments to pass to the {e docker compose up} command.
       This calls {e docker compose} which is GA as of April 2022 and should be used in preference over version 1. *)
