@@ -110,6 +110,21 @@ module type DOCKER = sig
       [contents] contains the full Compose Yaml file.
       [up_args] contains additional arguments to pass to the {e docker compose up} command.
       This calls {e docker compose} which is GA as of April 2022 and should be used in preference over version 1. *)
+
+  val compose_v2 :
+    ?docker_compose_file:[`File of Fpath.t | `Contents of string] Current.t ->
+    ?path:Fpath.t ->
+    ?pull:bool ->
+    ?detach:bool ->
+    ?up_args:string list ->
+    project_name:string ->
+    image:Image.t Current.t ->
+    source ->
+    unit Current.t
+  (** [compose_v2 ~name ~image ~contents ()] keeps a Docker Compose Cli deployment up-to-date.
+      [contents] contains the full Compose Yaml file.
+      [up_args] contains additional arguments to pass to the {e docker compose up} command.
+      This calls {e docker compose} which is GA as of April 2022 and should be used in preference over version 1. *)
 end
 
 module type HOST = sig

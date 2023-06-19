@@ -64,6 +64,17 @@ module Raw = struct
   let compose_cli ?(pull=true) ?(up_args = []) ~docker_context ~name ~detach ~contents () =
      CCC.set Compose_cli.{ pull } { Compose_cli.Key.name; docker_context; detach ; up_args } { Compose_cli.Value.contents }
 
+  module CV2 = Current_cache.Output(Compose_v2)
+
+  let compose_v2 ?docker_compose_file ?path ?(pull=true) ?(detach=true) ?(up_args = []) ~docker_context ~project_name ~image commit =
+    let docker_compose_file =
+      match docker_compose_file with
+      | None -> `File (Fpath.v "docker-compose.yml")
+      | Some (`File _ as f) -> f
+      | Some (`Contents c) -> `Contents c
+    in
+    CV2.set Compose_v2.{ pull } { Compose_v2.Key.commit; docker_compose_file; path; docker_context; detach; up_args; project_name } { Compose_v2.Value.image }
+
   module Cmd = struct
     open Lwt.Infix
 
@@ -185,6 +196,13 @@ module Make (Host : S.HOST) = struct
     Current.component "docker-compose-cli@,%s" name |>
     let> contents = contents in
     Raw.compose_cli ?pull ?up_args ~docker_context ~name ~detach ~contents ()
+
+  let compose_v2 ?docker_compose_file ?path ?pull ?detach ?up_args ~project_name ~image src =
+    Current.component "docker-compose-v2@,%s" project_name |>
+    let> commit = get_build_context src
+    and> image = image
+    and> docker_compose_file = Current.option_seq docker_compose_file in
+    Raw.compose_v2 ?docker_compose_file ?path ?pull ?detach ?up_args ~docker_context ~project_name ~image commit
 end
 
 module Default = Make(struct

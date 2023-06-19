@@ -88,6 +88,18 @@ module Raw : sig
     contents:string ->
     unit -> unit Current.Primitive.t
 
+  val compose_v2 :
+    ?docker_compose_file:[`File of Fpath.t | `Contents of string] ->
+    ?path:Fpath.t ->
+    ?pull:bool ->
+    ?detach:bool ->
+    ?up_args:string list ->
+    docker_context:string option ->
+    project_name:string ->
+    image:Image.t ->
+    [ `Git of Current_git.Commit.t | `Dir of Fpath.t | `No_context ] ->
+    unit Current.Primitive.t
+
   (** Building Docker commands. *)
   module Cmd : sig
     type t = Lwt_process.command
