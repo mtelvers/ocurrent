@@ -54,17 +54,13 @@ module Raw = struct
   let service ~docker_context ~name ~image () =
     SC.set Service.No_context { Service.Key.name; docker_context } { Service.Value.image }
 
-  module CC = Current_cache.Output(Compose)
+  module CV2 = Current_cache.Output(Compose_v2)
 
   let compose ?(pull=true) ~docker_context ~name ~contents () =
-    CC.set Compose.{ pull } { Compose.Key.name; docker_context } { Compose.Value.contents }
-
-  module CCC = Current_cache.Output(Compose_cli)
+    CV2.set Compose_v2.{ pull } { Compose_v2.Key.commit = `No_context; docker_compose_file = `Contents contents; path = None; docker_context; detach = true; up_args = []; project_name = name } { Compose_v2.Value.repos = [] }
 
   let compose_cli ?(pull=true) ?(up_args = []) ~docker_context ~name ~detach ~contents () =
-     CCC.set Compose_cli.{ pull } { Compose_cli.Key.name; docker_context; detach ; up_args } { Compose_cli.Value.contents }
-
-  module CV2 = Current_cache.Output(Compose_v2)
+    CV2.set Compose_v2.{ pull } { Compose_v2.Key.commit = `No_context; docker_compose_file = `Contents contents; path = None; docker_context; detach; up_args; project_name = name } { Compose_v2.Value.repos = [] }
 
   let compose_v2 ?docker_compose_file ?path ?(pull=true) ?(detach=true) ?(up_args = []) ~docker_context ~project_name ~repos commit =
     let docker_compose_file =
