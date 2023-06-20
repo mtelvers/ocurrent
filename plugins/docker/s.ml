@@ -118,7 +118,7 @@ module type DOCKER = sig
     ?detach:bool ->
     ?up_args:string list ->
     project_name:string ->
-    images:Image.t Current.t list ->
+    repos:(string * Image.t Current.t) list ->
     source ->
     unit Current.t
   (** [compose_v2 ~name ~images ~contents ()] keeps a Docker Compose Cli deployment up-to-date.

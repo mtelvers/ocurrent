@@ -96,7 +96,7 @@ module Raw : sig
     ?up_args:string list ->
     docker_context:string option ->
     project_name:string ->
-    images:Image.t list ->
+    repos:Repo.t list ->
     [ `Git of Current_git.Commit.t | `Dir of Fpath.t | `No_context ] ->
     unit Current.Primitive.t
 

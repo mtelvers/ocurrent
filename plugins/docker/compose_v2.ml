@@ -44,12 +44,12 @@ end
 
 module Value = struct
   type t = {
-    images : Image.t list;
+    repos : Repo.t list;
   }
 
-  let digest { images } =
+  let digest { repos } =
     Yojson.Safe.to_string @@ `Assoc [
-      "image", `String (List.fold_left (fun acc image -> acc ^ (Image.hash image)) String.empty images);
+      "image", `String (List.fold_left (fun acc image -> acc ^ (Repo.digest image)) String.empty repos);
     ]
 end
 
@@ -69,7 +69,12 @@ let with_context ~job context fn =
       fn dir
   | `Git commit -> Current_git.with_checkout ~job commit fn
 
-let publish { pull } job key { Value.images } =
+let search_and_replace needle haystack replacement =
+  match Astring.String.find_sub ~sub:needle haystack with
+  | None -> haystack
+  | Some len -> (Astring.String.with_range ~len haystack) ^ replacement ^ (Astring.String.with_range ~first:(len + String.length needle) haystack)
+
+let publish { pull } job key { Value.repos } =
   let { Key.commit; docker_context; docker_compose_file; detach; up_args; project_name; path } = key in
   Current.Job.start job ~level:Current.Level.Dangerous >>= fun () ->
   with_context ~job commit @@ fun dir ->
@@ -80,6 +85,7 @@ let publish { pull } job key { Value.images } =
   let file =
     match docker_compose_file with
     | `Contents contents ->
+      let contents = List.fold_left (fun acc repo -> search_and_replace (Repo.name repo) acc (Repo.digest repo)) contents repos in
       Bos.OS.File.write Fpath.(dir / "docker-compose.yml") (contents ^ "\n") |> or_raise;
       []
     | `File name ->
