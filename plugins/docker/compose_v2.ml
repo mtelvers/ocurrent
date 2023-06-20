@@ -49,14 +49,14 @@ module Value = struct
 
   let digest { repos } =
     Yojson.Safe.to_string @@ `Assoc [
-      "image", `String (List.fold_left (fun acc image -> acc ^ (Repo.digest image)) String.empty repos);
+      "image", `String (List.map (fun image -> Repo.digest image) repos |> String.concat ";");
     ]
 end
 
 module Outcome = Current.Unit
 
 let or_raise = function
-  | Ok () -> ()
+  | Ok x -> x
   | Error (`Msg m) -> raise (Failure m)
 
 let with_context ~job context fn =
@@ -82,14 +82,19 @@ let publish { pull } job key { Value.repos } =
     | Some path -> Fpath.(dir // path)
     | None -> dir
   in
-  let file =
+  let contents, name =
     match docker_compose_file with
-    | `Contents contents ->
-      let contents = List.fold_left (fun acc repo -> search_and_replace (Repo.name repo) acc (Repo.digest repo)) contents repos in
-      Bos.OS.File.write Fpath.(dir / "docker-compose.yml") (contents ^ "\n") |> or_raise;
-      []
-    | `File name ->
-      ["-f"; Fpath.(to_string (dir // name))]
+    | `Contents contents -> contents ^ "\n", Fpath.(dir / "docker-compose.yml")
+    | `File name -> Bos.OS.File.read Fpath.(dir // name) |> or_raise, name
+  in
+  let contents = List.fold_left (fun acc repo -> search_and_replace (Repo.name repo) acc (Repo.digest repo)) contents repos
+  in
+  let file =
+    Bos.OS.File.write Fpath.(dir // name) contents |> or_raise;
+    Current.Job.log job "@[<v2>%s\n%a@]" Fpath.(to_string name) Fmt.string contents;
+    match docker_compose_file with
+    | `Contents _ -> []
+    | `File name -> ["-f"; Fpath.(to_string (dir // name))]
   in
   let args = ["compose"; "-p"; project_name] @ file in
   let p =
