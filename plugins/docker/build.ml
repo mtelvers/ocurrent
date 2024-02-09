@@ -100,7 +100,7 @@ let build { pull; pool; timeout; level } job key =
   let cmd = Cmd.docker ~docker_context (
     buildx @ ["build"] @
     pull @ squash @ build_args @ file @
-    ["--iidfile";
+    ["-o"; "type=docker"; "--iidfile";
      Fpath.to_string iidfile; "--";
      Fpath.to_string dir])
   in
