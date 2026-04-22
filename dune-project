@@ -38,6 +38,26 @@
 (license "Apache-2.0")
 
 (package
+ (name current_term)
+ (synopsis "Incremental term DSL for OCurrent pipelines")
+ (description "\
+The pure term-language core of OCurrent: applicative and monadic combinators
+(let+, let*, pair, list_map, gate, cutoff, etc.), incremental static
+analysis, and dot-graph rendering.
+
+This package is scheduler-agnostic — it depends only on current_incr — and
+is intended to be shared between execution layers (e.g. the Lwt-based
+'current' package today, and future Eio-based equivalents).
+
+Most users should depend on 'current' rather than this package directly.")
+ (depends
+  (ocaml (>= 4.12.0))
+  bos
+  (current_incr (>= 0.6.1))
+  (fmt (>= 0.8.9))
+  ppx_deriving))
+
+(package
  (name current)
  (synopsis "Pipeline language for keeping things up-to-date")
  (description "\
@@ -58,6 +78,7 @@ run steps in parallel where possible.")
   (cmdliner (>= 1.1.0))
   (conf-libev (<> :os win32))
   (current_incr (>= 0.6.1))
+  (current_term (= :version))
   duration
   (fmt (>= 0.8.9))
   (fpath (>= 0.7.3))

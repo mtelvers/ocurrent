@@ -8,7 +8,7 @@
   bos
   current
   current.cache
-  current.term
+  current_term
   current_incr
   current_docker_test
   current_fs

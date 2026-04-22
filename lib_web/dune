@@ -19,7 +19,7 @@
   cstruct
   current
   current.cache
-  current.term
+  current_term
   csv
   ansi
   fmt

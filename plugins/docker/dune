@@ -5,7 +5,7 @@
   bos
   current
   current.cache
-  current.term
+  current_term
   current_git
   duration
   fmt

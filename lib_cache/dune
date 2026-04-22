@@ -3,7 +3,7 @@
  (name current_cache)
  (libraries
   current
-  current.term
+  current_term
   current_incr
   duration
   fmt

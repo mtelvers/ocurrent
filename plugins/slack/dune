@@ -5,7 +5,7 @@
   cohttp-lwt-unix
   current
   current.cache
-  current.term
+  current_term
   fmt
   logs
   lwt

@@ -22,7 +22,7 @@
   capnp-rpc-unix
   cmdliner
   current
-  current.term
+  current_term
   current.cache
   current.fs
   current_docker

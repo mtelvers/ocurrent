@@ -4,7 +4,7 @@
   cmdliner
   current
   current.cache
-  current.term
+  current_term
   current_git
   current_web
   gitlab-unix

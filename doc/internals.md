@@ -68,7 +68,7 @@ It adds static analysis (which we'll look at in the next section) and error hand
 Normally it is wrapped in turn by the main OCurrent library, but we can use it directly like this:
 
 ```ocaml
-# #require "current.term";;
+# #require "current_term";;
 # module Term = Current_term.Make(Unit);;
 ...
 ```

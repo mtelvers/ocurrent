@@ -1,5 +1,5 @@
 (library
- (public_name current.term)
+ (public_name current_term)
  (name current_term)
  (libraries bos fmt current_incr)
  (preprocess

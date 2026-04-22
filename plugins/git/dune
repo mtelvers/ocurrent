@@ -7,7 +7,7 @@
   cstruct
   current
   current.cache
-  current.term
+  current_term
   fmt
   fpath
   irmin-watcher
