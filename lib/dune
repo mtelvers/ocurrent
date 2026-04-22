@@ -7,12 +7,12 @@
   current_term
   current_incr
   duration
+  eio
+  eio.unix
   fmt
   fpath
   logs
-  lwt
   lwt-dllist
-  lwt.unix
   prometheus
   re
   result

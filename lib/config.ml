@@ -1,34 +1,45 @@
-open Lwt.Infix
-
 type t = {
   mutable confirm : Level.t option;
-  level_cond : unit Lwt_condition.t;
+  level_cond : Eio.Condition.t;
+  level_mutex : Eio.Mutex.t;
+  auto_release : Duration.t option;
 }
 
 let set_confirm t level =
   Log.info (fun f -> f "Confirmation threshold is now %a" (Fmt.Dump.option Level.pp) level);
   t.confirm <- level;
-  Lwt_condition.broadcast t.level_cond ()
+  Eio.Condition.broadcast t.level_cond
 
 let get_confirm t = t.confirm
 
-(* If the level isn't changed manually within [duration], remove limiter. *)
-let slow_start_thread t duration =
-  Lwt.async
-    (fun () ->
-       let changed = Lwt_condition.wait t.level_cond in
-       Lwt.choose [Lwt_unix.sleep (Duration.to_f duration); changed] >|= fun () ->
-       if Lwt.state changed = Lwt.Sleep then (
-         Log.info (fun f -> f "Slow start period over; removing limiter");
-         set_confirm t None;
-       )
+(* If the level isn't changed manually within [duration], remove limiter.
+   The Engine is responsible for calling this once it has a switch to fork on. *)
+let start_slow_start ~sw ~clock t =
+  match t.auto_release with
+  | None -> ()
+  | Some duration ->
+    Eio.Fiber.fork ~sw (fun () ->
+      let result =
+        Eio.Fiber.first
+          (fun () ->
+            Eio.Time.sleep clock (Duration.to_f duration);
+            `Timeout)
+          (fun () ->
+            Eio.Mutex.use_rw ~protect:false t.level_mutex (fun () ->
+              Eio.Condition.await t.level_cond t.level_mutex);
+            `Changed)
+      in
+      match result with
+      | `Timeout ->
+        Log.info (fun f -> f "Slow start period over; removing limiter");
+        set_confirm t None
+      | `Changed -> ()
     )
 
 let v ?auto_release ?confirm () =
-  let level_cond = Lwt_condition.create () in
-  let t = { confirm; level_cond } in
-  Option.iter (slow_start_thread t) auto_release;
-  t
+  let level_cond = Eio.Condition.create () in
+  let level_mutex = Eio.Mutex.create () in
+  { confirm; level_cond; level_mutex; auto_release }
 
 let default = v ()
 
@@ -39,10 +50,11 @@ let now = Current_incr.of_var active_config
 let rec confirmed l t =
   match t.confirm with
   | Some threshold when Level.compare l threshold >= 0 ->
-    Lwt_condition.wait t.level_cond >>= fun () ->
+    Eio.Mutex.use_rw ~protect:false t.level_mutex (fun () ->
+      Eio.Condition.await t.level_cond t.level_mutex);
     confirmed l t
   | _ ->
-    Lwt.return_unit
+    ()
 
 open Cmdliner
 

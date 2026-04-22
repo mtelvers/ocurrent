@@ -51,7 +51,7 @@ is intended to be shared between execution layers (e.g. the Lwt-based
 
 Most users should depend on 'current' rather than this package directly.")
  (depends
-  (ocaml (>= 4.12.0))
+  (ocaml (>= 5.0.0))
   bos
   (current_incr (>= 0.6.1))
   (fmt (>= 0.8.9))
@@ -72,27 +72,24 @@ A pipeline is written much like you would write a one-shot sequential script,
 but OCurrent will automatically re-run steps when the inputs change, and will
 run steps in parallel where possible.")
  (depends
-  (ocaml (>= 4.12.0))
+  (ocaml (>= 5.0.0))
   (astring (>= 0.8.5))
   bos
   (cmdliner (>= 1.1.0))
-  (conf-libev (<> :os win32))
   (current_incr (>= 0.6.1))
   (current_term (= :version))
   duration
+  (eio (>= 1.0))
   (fmt (>= 0.8.9))
   (fpath (>= 0.7.3))
   (logs (>= 0.7.0))
-  (lwt (>= 5.7))
   lwt-dllist
   ppx_deriving
   prometheus
   (re (>= 1.9.0))
   (result (>= 1.5))
   sqlite3
-  (alcotest (and :with-test (>= 1.2.0)))
-  (alcotest-lwt (and :with-test (>= 1.2.0)))
-  (prometheus-app (and :with-test (>= 1.2)))))
+  (alcotest (and :with-test (>= 1.2.0)))))
 
 (package
  (name current_git)

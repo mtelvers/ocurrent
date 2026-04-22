@@ -1,44 +1,38 @@
 (** Like [Lwt_switch], but the cleanup functions are called in sequence, not
     in parallel, and a reason for the shutdown may be given. *)
 
-open Lwt.Infix
-
-type callback = unit -> unit Lwt.t
+type callback = unit -> unit
 
 type t = {
-  mutable state : [`On of string * callback Stack.t | `Turning_off of unit Lwt.t | `Off];
+  mutable state : [`On of string * callback Stack.t | `Turning_off of unit Eio.Promise.t | `Off];
 }
-
-let pp_reason f x = Current_term.Output.pp (Fmt.any "()") f (x :> unit Current_term.Output.t)
 
 let turn_off t =
   match t.state with
   | `Off ->
-    Log.debug (fun f -> f "Switch.turn_off: already off");
-    Lwt.return_unit
-  | `Turning_off thread ->
-    thread
+    Log.debug (fun f -> f "Switch.turn_off: already off")
+  | `Turning_off p ->
+    Eio.Promise.await p
   | `On (_, callbacks) ->
-    let th, set_th = Lwt.wait () in
-    t.state <- `Turning_off th;
+    let p, r = Eio.Promise.create () in
+    t.state <- `Turning_off p;
     let rec aux () =
       match Stack.pop callbacks with
-      | fn -> fn () >>= aux
+      | fn -> fn (); aux ()
       | exception Stack.Empty ->
         t.state <- `Off;
-        Lwt.wakeup set_th ();
-        Lwt.return_unit
+        Eio.Promise.resolve r ()
     in
     aux ()
 
-(* Once the first callback is added, attach a GC finaliser so we can detect if the user
-   forgets to turn it off. *)
+(* Once the first callback is added, attach a GC finaliser so we can detect if
+   the user forgets to turn it off. We can't run cleanups from a finaliser
+   under Eio (no fiber context), so this just logs the leak. *)
 let gc t =
   match t.state with
   | `Off | `Turning_off _ -> ()
   | `On (label, _) ->
-    Log.err (fun f -> f "Switch %S GC'd while still on!" label);
-    Lwt.async (fun () -> turn_off t)
+    Log.err (fun f -> f "Switch %S GC'd while still on!" label)
 
 let add_hook_or_fail t fn =
   match t.state with
@@ -52,16 +46,16 @@ let add_hook_or_exec t fn =
   match t.state with
   | `On (_, callbacks) ->
     if Stack.is_empty callbacks then Gc.finalise gc t;
-    Stack.push fn callbacks;
-    Lwt.return_unit
+    Stack.push fn callbacks
   | `Off ->
     fn ()
-  | `Turning_off thread ->
-    thread >>= fn
+  | `Turning_off p ->
+    Eio.Promise.await p;
+    fn ()
 
 let add_hook_or_exec_opt t fn =
   match t with
-  | None -> Lwt.return_unit
+  | None -> ()
   | Some t -> add_hook_or_exec t fn
 
 let create ~label () = {

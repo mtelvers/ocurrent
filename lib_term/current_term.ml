@@ -352,3 +352,19 @@ module Make (Metadata : sig type t end) = struct
     let quick_stat = Quick_stats.get
   end
 end
+
+(** Direct-style error handling for plugin authors. Open
+    [Current.Result.Syntax] to use [let*], [let+] etc. on OCaml's
+    [result] type. *)
+module Result = struct
+  module Syntax = struct
+    let (let*) = Result.bind
+    let (let+) x f = Result.map f x
+    let (and*) a b =
+      match a, b with
+      | Ok x, Ok y -> Ok (x, y)
+      | Error _ as e, _ -> e
+      | _, (Error _ as e) -> e
+    let (and+) = (and*)
+  end
+end

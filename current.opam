@@ -47,18 +47,17 @@ doc: "https://ocurrent.github.io/ocurrent/"
 bug-reports: "https://github.com/ocurrent/ocurrent/issues"
 depends: [
   "dune" {>= "3.3"}
-  "ocaml" {>= "4.12.0"}
+  "ocaml" {>= "5.0.0"}
   "astring" {>= "0.8.5"}
   "bos"
   "cmdliner" {>= "1.1.0"}
-  "conf-libev" {os != "win32"}
   "current_incr" {>= "0.6.1"}
   "current_term" {= version}
   "duration"
+  "eio" {>= "1.0"}
   "fmt" {>= "0.8.9"}
   "fpath" {>= "0.7.3"}
   "logs" {>= "0.7.0"}
-  "lwt" {>= "5.7"}
   "lwt-dllist"
   "ppx_deriving"
   "prometheus"
@@ -66,8 +65,6 @@ depends: [
   "result" {>= "1.5"}
   "sqlite3"
   "alcotest" {with-test & >= "1.2.0"}
-  "alcotest-lwt" {with-test & >= "1.2.0"}
-  "prometheus-app" {with-test & >= "1.2"}
   "odoc" {with-doc}
 ]
 build: [
