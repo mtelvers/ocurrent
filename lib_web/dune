@@ -14,23 +14,22 @@
   base64
   bos
   cmdliner
-  cohttp-lwt-unix
-  conduit-lwt-unix
+  cohttp-eio
   cstruct
   current
   current.cache
   current_term
   csv
   ansi
+  eio
+  eio.unix
   fmt
   fpath
   logs
-  lwt
-  lwt.unix
+  magic-mime
   mirage-crypto
-  mirage-crypto-rng
   mirage-crypto-rng.unix
-  multipart_form-lwt
+  multipart_form
   ppx_sexp_conv.runtime-lib
   prometheus
   prometheus-app
@@ -38,7 +37,7 @@
   result
   routes
   session
-  session-cohttp-lwt
+  session-cohttp
   sexplib
   sqlite3
   tyxml

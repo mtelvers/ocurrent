@@ -1,5 +1,3 @@
-open Lwt.Infix
-
 let cookie_key = "__session"
 
 let img_dashboard_logo = "/img/dashboard-logo.png"
@@ -13,15 +11,15 @@ type t = {
 
 let of_request ~site request =
   let headers = Cohttp.Request.headers request in
-  Site.Sess.of_header_or_create site.Site.session_backend cookie_key "" headers >>= fun session ->
-  begin
+  let session = Site.Sess.of_header_or_create site.Site.session_backend cookie_key "" headers in
+  let user =
     match User.unmarshal session.value with
-    | Ok x -> Lwt.return x
+    | Ok x -> x
     | Error m ->
       Log.err (fun f -> f "Invalid user in session table: %s" m);
-      Site.Sess.clear site.session_backend session >|= fun () ->
+      Site.Sess.clear site.session_backend session;
       None
-  end >|= fun user ->
+  in
   { site; session; user; request }
 
 let headers t =
@@ -119,7 +117,8 @@ let respond_ok t ?refresh body =
   Utils.Server.respond_string ~headers ~status:`OK ~body ()
 
 let respond_redirect t uri =
-  Utils.Server.respond_redirect ~headers:(headers t) ~uri ()
+  let headers = Cohttp.Header.add (headers t) "Location" (Uri.to_string uri) in
+  Utils.Server.respond_string ~headers ~status:`Found ~body:"" ()
 
 let respond_error t status msg =
   let headers = Cohttp.Header.add (headers t) "Content-Type" "text/html; charset=utf-8" in
@@ -127,5 +126,5 @@ let respond_error t status msg =
   Utils.Server.respond_string ~headers ~status ~body ()
 
 let set_user t user =
-  Site.Sess.generate t.site.session_backend (User.marshal user) >>= fun session ->
+  let session = Site.Sess.generate t.site.session_backend (User.marshal user) in
   respond_redirect { t with session } (Uri.of_string "/")

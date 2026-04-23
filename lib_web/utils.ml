@@ -1,4 +1,19 @@
-module Server = Cohttp_lwt_unix.Server
+module Server = struct
+  include Cohttp_eio.Server
+
+  (* Compatibility helpers for the cohttp-lwt-unix APIs the lib expects. *)
+
+  let respond_redirect ?(headers=Cohttp.Header.init ()) ~uri () =
+    let headers = Cohttp.Header.add headers "Location" (Uri.to_string uri) in
+    respond_string ~headers ~status:`Found ~body:"" ()
+
+  let respond_not_found () =
+    respond_string ~status:`Not_found ~body:"Not found" ()
+
+  let respond_error ?(status=`Internal_server_error) ~body () =
+    respond_string ~status ~body ()
+end
+
 module Path = Cohttp.Path
 
 let string_of_timestamp time =

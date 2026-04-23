@@ -1,5 +1,3 @@
-open Lwt.Infix
-
 module User = User
 module Role = Role
 module Site = Site
@@ -12,7 +10,7 @@ let metrics ~engine = object
 
   method! private get _ctx =
     Current.Engine.(update_metrics engine);
-    Prometheus.CollectorRegistry.(collect default) >>= fun data ->
+    let data = Prometheus.CollectorRegistry.(collect default) in
     let body = Fmt.to_to_string Prometheus_app.TextFormat_0_0_4.output data in
     let headers =
       Cohttp.Header.init_with "Content-Type" "text/plain; version=0.0.4"
@@ -74,35 +72,41 @@ let handle_request ~site _conn request body =
       Utils.Server.respond_error ~status:`Bad_request ~body:"Bad method" ()
 
 
-type t = 
+type t =
   { host : string option;
-    port : Conduit_lwt_unix.server }
+    port : int }
 
 let pp_mode f { host; port } =
-  let modes = Conduit_lwt_unix.sexp_of_server port in
-  Sexplib.Sexp.pp_hum f (Sexplib0.Sexp.List [(match host with None -> Atom "*:" | Some host -> Atom (host ^ ":")); modes])
+  Fmt.pf f "%a:%d" Fmt.(option ~none:(any "*") string) host port
 
-let default_mode = { host = None; port = `TCP (`Port 8080) }
+let default_mode = { host = None; port = 8080 }
 
-let ctx_of_host host = 
-  match host with
-  | None -> Lwt.return None
+let ipaddr_of_host = function
+  | None -> Eio.Net.Ipaddr.V4.any
   | Some host ->
-   Lwt.bind (Conduit_lwt_unix.init ~src:host ()) 
-      (fun ctx -> Lwt.return (Some (Cohttp_lwt_unix.Net.init ~ctx ())))    
+    (* Parse via Unix resolver — accepts dotted-quad or hostnames. *)
+    let addrs = Unix.getaddrinfo host "" [AI_FAMILY PF_INET; AI_SOCKTYPE SOCK_STREAM] in
+    (match addrs with
+     | [] -> Fmt.failwith "Cannot resolve host %S" host
+     | { ai_addr = ADDR_INET (addr, _); _ } :: _ ->
+       Eio_unix.Net.Ipaddr.of_unix addr
+     | _ :: _ -> Fmt.failwith "No IPv4 address for host %S" host)
 
 let run ?(mode=default_mode) site =
   let callback = handle_request ~site in
-  let config = Utils.Server.make ~callback () in
+  let server = Utils.Server.make ~callback () in
   Log.info (fun f -> f "Starting web server: %a" pp_mode mode);
-  Lwt.try_bind
-    (fun () -> Lwt.bind (ctx_of_host mode.host) (fun ctx -> Utils.Server.create ?ctx ~mode:mode.port config))
-    (fun () -> Lwt.return @@ Error (`Msg "Web-server stopped!"))
-    (function
-      | Unix.Unix_error(Unix.EADDRINUSE, "bind", _) ->
-         Lwt.return @@ Fmt.error_msg "Web-server failed.@ Another program is already using this port %a." pp_mode mode
-      | ex -> Lwt.reraise ex
-    )
+  let env = Current.Engine_env.get_env () in
+  let sw = Current.Engine_env.get_sw () in
+  let net = Eio.Stdenv.net env in
+  try
+    let addr = `Tcp (ipaddr_of_host mode.host, mode.port) in
+    let socket = Eio.Net.listen ~sw ~backlog:128 ~reuse_addr:true net addr in
+    Utils.Server.run socket server
+      ~on_error:(fun ex -> Log.warn (fun f -> f "Web server error: %a" Fmt.exn ex))
+  with
+  | Unix.Unix_error (Unix.EADDRINUSE, "bind", _) ->
+    Fmt.failwith "Web-server failed.@ Another program is already using this port %a." pp_mode mode
 
 open Cmdliner
 
@@ -122,7 +126,7 @@ let port =
     ~docv:"PORT"
     ["port"]
 
-let make host port = { host; port = `TCP (`Port port) }
+let make host port = { host; port }
 
 let cmdliner =
   Term.(const make $ host $ port)

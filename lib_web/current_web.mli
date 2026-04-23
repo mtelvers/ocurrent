@@ -28,10 +28,10 @@ module Site : sig
   (** Site configuration settings. *)
 
   class type raw_resource = object
-    method get_raw : t -> Cohttp.Request.t -> (Cohttp.Response.t * Cohttp_lwt.Body.t) Lwt.t
+    method get_raw : t -> Cohttp.Request.t -> Cohttp_eio.Server.response
     (** Handle an HTTP GET request. *)
 
-    method post_raw : t -> Cohttp.Request.t -> Cohttp_lwt.Body.t -> (Cohttp.Response.t * Cohttp_lwt.Body.t) Lwt.t
+    method post_raw : t -> Cohttp.Request.t -> Cohttp_eio.Body.t -> Cohttp_eio.Server.response
     (** Handle an HTTP POST request. *)
 
     method nav_link : string option
@@ -64,25 +64,25 @@ module Context : sig
   type t
   (** The context of a single web request. *)
 
-  val of_request : site:Site.t -> Cohttp.Request.t -> t Lwt.t
+  val of_request : site:Site.t -> Cohttp.Request.t -> t
 
   val request : t -> Cohttp.Request.t
 
   val csrf : t -> string
   (** [csrf t] is the user's CSRF token to include in POST forms. *)
 
-  val set_user : t -> User.t -> (Cohttp.Response.t * Cohttp_lwt.Body.t) Lwt.t
+  val set_user : t -> User.t -> Cohttp_eio.Server.response
   (** [set_user t user] records a successful login by [user] and redirects the
       user back to the page they came from. *)
 
-  val respond_ok : t -> ?refresh:int -> [< Html_types.div_content_fun ] Tyxml.Html.elt list -> (Cohttp.Response.t * Cohttp_lwt.Body.t) Lwt.t
+  val respond_ok : t -> ?refresh:int -> [< Html_types.div_content_fun ] Tyxml.Html.elt list -> Cohttp_eio.Server.response
   (** [respond_ok ctx refresh content] returns a successful page with [content] inserted into the site template.
     If [refresh] is [Some s], the page is refreshed every [s] seconds. *)
 
-  val respond_redirect : t -> Uri.t -> (Cohttp.Response.t * Cohttp_lwt.Body.t) Lwt.t
+  val respond_redirect : t -> Uri.t -> Cohttp_eio.Server.response
   (** [respond_redirect ctx uri] redirects the user to [uri]. *)
 
-  val respond_error : t -> Cohttp.Code.status_code -> string -> (Cohttp.Response.t * Cohttp_lwt.Body.t) Lwt.t
+  val respond_error : t -> Cohttp.Code.status_code -> string -> Cohttp_eio.Server.response
   (** [respond_error ctx code msg] returns an error message to the user, inside the site template. *)
 end
 
@@ -97,12 +97,12 @@ module Resource : sig
     val can_post : Role.t
     (** The role the client needs in order to make a POST request. *)
 
-    method private get : Context.t -> (Cohttp.Response.t * Cohttp_lwt.Body.t) Lwt.t
+    method private get : Context.t -> Cohttp_eio.Server.response
     (** Concrete resources should override this method to handle GET requests.
         {!get_raw} checks that the caller has the {!can_get} role and then calls this.
         The default method returns a [`Bad_request] error. *)
 
-    method private post : Context.t -> string -> (Cohttp.Response.t * Cohttp_lwt.Body.t) Lwt.t
+    method private post : Context.t -> string -> Cohttp_eio.Server.response
     (** Concrete resources should override this method to handle POSTs.
         {!get_post} checks that the caller has the {!can_post} role, reads the
         body, checks the CSRF token, and then calls this.
@@ -113,11 +113,12 @@ end
 val routes : Current.Engine.t -> Resource.t Routes.route list
 (** [routes engine] is the default routes for a web interface to [engine]. *)
 
-type t = 
+type t =
   { host : string option;
-    port : Conduit_lwt_unix.server }
+    port : int }
 
-val run : ?mode:t -> Site.t -> ('a, [`Msg of string]) result Lwt.t
-(** [run ~mode site] runs a web-server (with configuration [mode]) that handles incoming requests for [site]. *)
+val run : ?mode:t -> Site.t -> 'a
+(** [run ~mode site] runs a web-server (with configuration [mode]) that handles incoming requests for [site].
+    Blocks the calling fiber until the server stops. Requires {!Current.Engine_env} to be initialised. *)
 
 val cmdliner : t Cmdliner.Term.t

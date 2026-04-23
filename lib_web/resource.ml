@@ -1,5 +1,3 @@
-open Lwt.Infix
-
 let () = Mirage_crypto_rng_unix.initialize (module Mirage_crypto_rng.Fortuna)
 
 let forbidden (ctx : Context.t) =
@@ -28,12 +26,12 @@ class virtual t = object (self : #Site.raw_resource)
     Context.respond_error ctx `Bad_request "Bad method"
 
   method get_raw site request =
-    Context.of_request ~site request >>= fun ctx ->
+    let ctx = Context.of_request ~site request in
     if Context.has_role ctx can_get then self#get ctx
     else forbidden ctx
 
   method post_raw site request body =
-    Context.of_request ~site request >>= fun ctx ->
+    let ctx = Context.of_request ~site request in
     if Context.has_role ctx can_post then (
       match Cohttp.(Header.get (Request.headers request)) "Content-Type" with
       | None -> Context.respond_error ctx `Bad_request "Unset Content-Type on POST request"
@@ -41,12 +39,11 @@ class virtual t = object (self : #Site.raw_resource)
         match Multipart_form.Content_type.of_string (content_type ^ "\r\n") with
         | Error (`Msg e) -> Context.respond_error ctx `Bad_request e
         | Ok ({ty = `Multipart; subty = `Iana_token "form-data"; _} as content_type) ->
-          let body = Cohttp_lwt.Body.to_stream body in
-          Multipart_form_lwt.of_stream_to_tree body content_type >>= fun tree ->
-          begin match tree with
+          let body_str = Eio.Buf_read.(of_flow ~max_size:max_int body |> take_all) in
+          begin match Multipart_form.of_string_to_tree body_str content_type with
             | Error (`Msg e) -> Context.respond_error ctx `Bad_request e
-            | Ok multipart ->
-              let multipart = Multipart_form.flatten multipart in
+            | Ok tree ->
+              let multipart = Multipart_form.flatten tree in
               let csrf, others = List.partition (fun {Multipart_form.header; _} ->
                                      match Multipart_form.Header.content_disposition header with
                                      | Some header -> Multipart_form.Content_disposition.name header = Some "csrf"
@@ -58,7 +55,7 @@ class virtual t = object (self : #Site.raw_resource)
               end
           end
         | Ok _ ->
-          Cohttp_lwt.Body.to_string body >>= fun body ->
+          let body = Eio.Buf_read.(of_flow ~max_size:max_int body |> take_all) in
           let data = Uri.query_of_encoded body in
           match List.assoc_opt "csrf" data |> Option.value ~default:[] with
           | [got] when got = Context.csrf ctx ->
@@ -76,18 +73,18 @@ let render_logged_out ctx =
 
 let logout = object
   method get_raw site request =
-    Context.of_request ~site request >>= fun ctx ->
+    let ctx = Context.of_request ~site request in
     Context.respond_error ctx `Bad_request "Use a POST to log out"
 
   method post_raw site request body =
-    Context.of_request ~site request >>= fun ctx ->
+    let ctx = Context.of_request ~site request in
     if ctx.user = None then render_logged_out ctx
     else (
-      Cohttp_lwt.Body.to_string body >>= fun body ->
+      let body = Eio.Buf_read.(of_flow ~max_size:max_int body |> take_all) in
       let data = Uri.query_of_encoded body in
       match List.assoc_opt "csrf" data |> Option.value ~default:[] with
       | [got] when got = Context.csrf ctx ->
-        Site.Sess.clear site.session_backend ctx.session >>= fun () ->
+        Site.Sess.clear site.session_backend ctx.session;
         render_logged_out { ctx with user = None }
       | _ -> Context.respond_error ctx `Bad_request "Bad CSRF token"
     )

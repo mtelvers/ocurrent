@@ -1,11 +1,19 @@
+(* An identity IO monad: sync, no wrapping. Lets us reuse the session-cohttp
+   library (which is parametric in an IO monad) without pulling in Lwt. *)
+module Ident_io = struct
+  type +'a t = 'a
+  let return x = x
+  let (>>=) x f = f x
+end
+
 module Sess = struct
-  module Backend = Session.Lift.IO(Lwt)(Sqlite_session)
-  include Session_cohttp_lwt.Make(Backend)
+  module Backend = Session.Lift.IO(Ident_io)(Sqlite_session)
+  include Session_cohttp.Make(Ident_io)(Backend)
 end
 
 class type ['site] raw = object
-  method get_raw : 'site -> Cohttp.Request.t -> (Cohttp.Response.t * Cohttp_lwt.Body.t) Lwt.t
-  method post_raw : 'site -> Cohttp.Request.t -> Cohttp_lwt.Body.t -> (Cohttp.Response.t * Cohttp_lwt.Body.t) Lwt.t
+  method get_raw : 'site -> Cohttp.Request.t -> Cohttp_eio.Server.response
+  method post_raw : 'site -> Cohttp.Request.t -> Cohttp_eio.Body.t -> Cohttp_eio.Server.response
   method nav_link : string option
 end
 

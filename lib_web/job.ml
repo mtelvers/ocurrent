@@ -1,6 +1,5 @@
 open Tyxml.Html
 open Astring
-open Lwt.Infix
 
 let sep = "@@LOG@@"
 
@@ -18,7 +17,94 @@ let read ~start path =
   let len = min max_log_chunk_size (len - start) in
   really_input_string ch (Int64.to_int len), start + len
 
-let render ctx ~actions ~job_id ~log:path =
+(* Streaming source for a job log response: first the template
+   header, then the log itself (waiting for more data if the job is
+   still running), then the template footer. Mirrors the original
+   Lwt_stream-based body used under cohttp-lwt. *)
+module Log_source = struct
+  type state = {
+    pre : string;
+    mutable pre_offset : int;
+    post : string;
+    mutable post_offset : int;
+    path : Fpath.t;
+    job_id : string;
+    ansi : Ansi.t;
+    mutable log_offset : int64;
+    mutable pending : string;
+    mutable pending_offset : int;
+    mutable phase : [`Pre | `Log | `Post | `Done];
+  }
+
+  let blit_from src_str src_off dst dst_off n =
+    Cstruct.blit_from_string src_str src_off dst dst_off n
+
+  let rec single_read t dst =
+    match t.phase with
+    | `Done -> raise End_of_file
+    | `Pre ->
+      let avail = String.length t.pre - t.pre_offset in
+      if avail = 0 then (t.phase <- `Log; single_read t dst)
+      else (
+        let len = min (Cstruct.length dst) avail in
+        blit_from t.pre t.pre_offset dst 0 len;
+        t.pre_offset <- t.pre_offset + len;
+        len
+      )
+    | `Log ->
+      let avail = String.length t.pending - t.pending_offset in
+      if avail > 0 then (
+        let len = min (Cstruct.length dst) avail in
+        blit_from t.pending t.pending_offset dst 0 len;
+        t.pending_offset <- t.pending_offset + len;
+        len
+      ) else (
+        match read ~start:t.log_offset t.path with
+        | "", _ ->
+          (match Current.Job.lookup_running t.job_id with
+           | None -> t.phase <- `Post; single_read t dst
+           | Some job ->
+             Current.Job.wait_for_log_data job;
+             single_read t dst)
+        | data, next ->
+          t.pending <- Ansi.process t.ansi data;
+          t.pending_offset <- 0;
+          t.log_offset <- next;
+          single_read t dst
+      )
+    | `Post ->
+      let avail = String.length t.post - t.post_offset in
+      if avail = 0 then (t.phase <- `Done; raise End_of_file)
+      else (
+        let len = min (Cstruct.length dst) avail in
+        blit_from t.post t.post_offset dst 0 len;
+        t.post_offset <- t.post_offset + len;
+        len
+      )
+
+  let read_methods = []
+
+  let create ~pre ~post ~path ~job_id ~ansi =
+    let state = {
+      pre; pre_offset = 0;
+      post; post_offset = 0;
+      path; job_id; ansi;
+      log_offset = 0L;
+      pending = ""; pending_offset = 0;
+      phase = `Pre;
+    } in
+    let ops = Eio.Flow.Pi.source (module struct
+      type nonrec t = state
+      let single_read = single_read
+      let read_methods = read_methods
+    end) in
+    Eio.Resource.T (state, ops)
+end
+
+(* Build an Eio flow source that streams the log response body:
+   the template header, then the log content (polling for more while the
+   job is still running), then the template footer. *)
+let log_body_source ctx ~actions ~job_id ~log:path =
   let ansi = Ansi.create () in
   let action op = a_action (Fmt.str "/job/%s/%s" job_id op) in
   let csrf = Context.csrf ctx in
@@ -87,28 +173,7 @@ let render ctx ~actions ~job_id ~log:path =
   match String.cut ~sep tmpl with
   | None -> assert false
   | Some (pre, post) ->
-    let i = ref `Pre in
-    let stream =
-      Lwt_stream.from (fun () ->
-          match !i with
-          | `Pre -> i := `Log 0L; Lwt.return_some pre
-          | `Log start ->
-            let rec aux () =
-              begin match read ~start path with
-                | "", _ ->
-                  begin match Current.Job.lookup_running job_id with
-                    | None -> i := `Done; Lwt.return_some post
-                    | Some job -> Current.Job.wait_for_log_data job >>= aux
-                  end
-                | (data, next) ->
-                  i := `Log next;
-                  Lwt.return_some (Ansi.process ansi data)
-              end
-            in aux ()
-          | `Done -> Lwt.return_none
-        )
-    in
-    Cohttp_lwt.Body.of_stream stream
+    Log_source.create ~pre ~post ~path ~job_id ~ansi
 
 type actions = <
   rebuild : (unit -> string) option;
@@ -134,7 +199,7 @@ let job ~engine ~job_id = object
     match Current.Job.log_path job_id with
     | Error (`Msg msg) -> Context.respond_error ctx `Bad_request msg
     | Ok path ->
-      let body = render ctx ~actions ~job_id ~log:path in
+      let body = log_body_source ctx ~actions ~job_id ~log:path in
       let headers =
         (* Otherwise, an nginx reverse proxy will wait for the whole log before sending anything. *)
         Cohttp.Header.init_with "X-Accel-Buffering" "no"
@@ -154,6 +219,7 @@ let rebuild ~engine ~job_id = object
     | None -> Context.respond_error ctx `Bad_request "Job does not support rebuild"
     | Some rebuild ->
       let new_id = rebuild () in
+      ignore ctx;
       Utils.Server.respond_redirect ~uri:(Uri.of_string ("/job/" ^ new_id)) ()
 end
 
