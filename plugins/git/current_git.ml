@@ -1,16 +1,11 @@
 open Current.Syntax
-open Lwt.Infix
+open Current.Result.Syntax
 
 let src = Logs.Src.create "current.git" ~doc:"OCurrent git plugin"
 module Log = (val Logs.src_log src : Logs.LOG)
 
 module Commit_id = Commit_id
 module Commit = Commit
-
-let ( >>!= ) x f =
-  x >>= function
-  | Ok y -> f y
-  | Error _ as e -> Lwt.return e
 
 let make_auth_env token =
   let b64 = Base64.encode_string ("x-access-token:" ^ token) in
@@ -24,6 +19,17 @@ module Fetch = struct
 
   let id = "git-fetch"
 
+  (* Per-repo lock so two fetches of the same repo don't race. *)
+  module Repo_map = Map.Make(String)
+  let repo_locks : Eio.Mutex.t Repo_map.t ref = ref Repo_map.empty
+  let repo_lock repo =
+    match Repo_map.find_opt repo !repo_locks with
+    | Some l -> l
+    | None ->
+      let l = Eio.Mutex.create () in
+      repo_locks := Repo_map.add repo l !repo_locks;
+      l
+
   let build { token } job key =
     let { Commit_id.repo = remote_repo; gref; hash = _ } = key in
     let env = Option.map make_auth_env token in
@@ -31,23 +37,23 @@ module Fetch = struct
       if Commit_id.is_local key then Current.Level.Harmless
       else Current.Level.Mostly_harmless
     in
-    Current.Job.start job ~level >>= fun () ->
-    Lwt_mutex.with_lock (Clone.repo_lock remote_repo) @@ fun () ->
+    Current.Job.start job ~level;
+    Eio.Mutex.use_rw ~protect:false (repo_lock remote_repo) @@ fun () ->
     let local_repo = Cmd.local_copy remote_repo in
     (* Ensure we have a local clone of the repository. *)
-    begin
-      if Cmd.dir_exists local_repo then Lwt.return (Ok ())
+    let* () =
+      if Cmd.dir_exists local_repo then Ok ()
       else Cmd.git_clone ~cancellable:true ~job ?env ~src:remote_repo local_repo
-    end >>!= fun () ->
+    in
     let commit = { Commit.repo = local_repo; id = key } in
     (* Fetch the commit (if missing). *)
-    begin
-      Commit.check_cached ~cancellable:false ~job commit >>= function
-      | Ok () -> Lwt.return (Ok ())
+    let* () =
+      match Commit.check_cached ~cancellable:false ~job commit with
+      | Ok () -> Ok ()
       | Error _ -> Cmd.git_fetch ~cancellable:true ~job ?env ~recurse_submodules:false ~src:remote_repo ~dst:local_repo gref
-    end >>!= fun () ->
+    in
     (* Check we got the commit we wanted. *)
-    Commit.check_cached ~cancellable:false ~job commit >>!= fun () ->
+    let* () = Commit.check_cached ~cancellable:false ~job commit in
     (* Get any submodules too.
        "sync" is needed to handle repositories moving.
        "deinit" is needed to handle submodules being removed.
@@ -59,11 +65,11 @@ module Fetch = struct
        rare enough that it's probably not worth trying to detect this and implementing a retry loop
        here. What we really want is "submodule update --init --sync --recursive --prune", but Git
        doesn't offer that. *)
-    Cmd.git_reset_hard ~job ~repo:local_repo commit.id.hash >>!= fun () ->
-    Cmd.git_submodule_sync ~cancellable:false ~job ~repo:local_repo >>!= fun () ->
-    Cmd.git_submodule_deinit ~force:true ~all:true ~cancellable:false ~job ~repo:local_repo >>!= fun () ->
-    Cmd.git_submodule_update ~init:true ~cancellable:true ~fetch:true ~job ~repo:local_repo >>!= fun () ->
-    Lwt.return @@ Ok commit
+    let* () = Cmd.git_reset_hard ~job ~repo:local_repo commit.id.hash in
+    let* () = Cmd.git_submodule_sync ~cancellable:false ~job ~repo:local_repo in
+    let* () = Cmd.git_submodule_deinit ~force:true ~all:true ~cancellable:false ~job ~repo:local_repo in
+    let* () = Cmd.git_submodule_update ~init:true ~cancellable:true ~fetch:true ~job ~repo:local_repo in
+    Ok commit
 
   let pp f key = Fmt.pf f "git fetch %a" Key.pp key
 
@@ -90,39 +96,29 @@ let with_checkout ?pool ~job commit fn =
   Current.Job.log job "@[<v2>Checking out commit %s. To reproduce:@,%a@]"
     short_hash Commit_id.pp_user_clone id;
   let switch = Current.Switch.create ~label:"clone" () in
-  Lwt.finalize
+  Fun.protect
+    ~finally:(fun () -> Current.Switch.turn_off switch)
     (fun () ->
-       begin
-         match pool with
-         | Some pool -> Current.Job.use_pool ~switch job pool
-         | None -> Lwt.return_unit
-       end >>= fun () ->
+       (match pool with
+        | Some pool -> let () = Current.Job.use_pool ~switch job pool in ()
+        | None -> ());
        Current.Process.with_tmpdir ~prefix:"git-checkout" @@ fun tmpdir ->
-       Cmd.cp_r ~cancellable:true ~job ~src:(Fpath.(repo / ".git")) ~dst:tmpdir >>!= fun () ->
-       Cmd.git_submodule_deinit ~force:true ~all:true ~cancellable:false ~job ~repo:tmpdir >>!= fun () ->
-       Cmd.git_reset_hard ~job ~repo:tmpdir id.Commit_id.hash >>= function
+       let* () = Cmd.cp_r ~cancellable:true ~job ~src:(Fpath.(repo / ".git")) ~dst:tmpdir in
+       let* () = Cmd.git_submodule_deinit ~force:true ~all:true ~cancellable:false ~job ~repo:tmpdir in
+       match Cmd.git_reset_hard ~job ~repo:tmpdir id.Commit_id.hash with
        | Ok () ->
-         Cmd.git_submodule_update ~init:true ~cancellable:true ~fetch:false ~job ~repo:tmpdir >>!= fun () ->
-         Current.Switch.turn_off switch >>= fun () ->
+         let* () = Cmd.git_submodule_update ~init:true ~cancellable:true ~fetch:false ~job ~repo:tmpdir in
+         Current.Switch.turn_off switch;
          fn tmpdir
        | Error e ->
-         Commit.check_cached ~cancellable:false ~job commit >>= function
+         match Commit.check_cached ~cancellable:false ~job commit with
          | Error not_cached ->
            Fetch_cache.invalidate id;
-           Lwt.return (Error not_cached)
-         | Ok () -> Lwt.return (Error e)
-    )
-    (fun () -> Current.Switch.turn_off switch)
+           Error not_cached
+         | Ok () -> Error e)
 
 module Local = struct
   module Ref_map = Map.Make(String)
-
-  let next_id =
-    let i = ref 0 in
-    fun () ->
-      let id = !i in
-      incr i;
-      id
 
   type t = {
     repo : Fpath.t;
@@ -133,13 +129,17 @@ module Local = struct
   let pp_repo f t = Fpath.pp f t.repo
 
   let read_reference t gref =
-    let cmd = [| "git"; "-C"; Fpath.to_string t.repo; "rev-parse"; "--revs-only"; gref |] in
-    Lwt_process.pread ("", cmd) >|= fun out ->
-    match String.trim out with
-    | "" -> Fmt.error_msg "Unknown ref %S" gref
-    | hash ->
-      let id = { Commit_id.repo = Fpath.to_string t.repo; gref; hash } in
-      Ok { Commit.repo = t.repo; id }
+    let cmd = ["git"; "-C"; Fpath.to_string t.repo; "rev-parse"; "--revs-only"; gref] in
+    let mgr = Current.Engine_env.process_mgr () in
+    match Eio.Process.parse_out mgr Eio.Buf_read.take_all cmd with
+    | out ->
+      (match String.trim out with
+       | "" -> Fmt.error_msg "Unknown ref %S" gref
+       | hash ->
+         let id = { Commit_id.repo = Fpath.to_string t.repo; gref; hash } in
+         Ok { Commit.repo = t.repo; id })
+    | exception ex ->
+      Fmt.error_msg "git rev-parse failed: %a" Fmt.exn ex
 
   let make_monitor t gref =
     let dot_git = Fpath.(t.repo / ".git") in
@@ -147,18 +147,18 @@ module Local = struct
       Fmt.failwith "Reference %S should start \"refs/\"" gref;
     let read () = read_reference t gref in
     let watch refresh =
+      let sw = Current.Engine_env.get_sw () in
       let watch_dir = Fpath.append dot_git (Fpath.v @@ Filename.dirname gref) in
       Log.debug (fun f -> f "Installing watch for %a" Fpath.pp watch_dir);
-      Irmin_watcher.hook (next_id ()) (Fpath.to_string watch_dir) (fun path ->
+      let unwatch =
+        Fs_watcher.hook ~sw (Fpath.to_string watch_dir) (fun path ->
           if path = Filename.basename gref then (
             Log.info (fun f -> f "Detected change in %S" path);
-            refresh ();
+            refresh ()
           ) else (
-            Log.debug (fun f -> f "Ignoring change in %S" path);
-          );
-          Lwt.return_unit
-        )
-      >|= fun unwatch ->
+            Log.debug (fun f -> f "Ignoring change in %S" path)
+          ))
+      in
       Log.debug (fun f -> f "Watch installed for %a" Fpath.pp watch_dir);
       fun () ->
         Log.debug (fun f -> f "Unwatching %a" Fpath.pp watch_dir);
@@ -210,20 +210,20 @@ module Local = struct
 
   let make_head repo =
     let dot_git = Fpath.(repo / ".git") in
-    let read () = Lwt.return (read_head repo) in
+    let read () = read_head repo in
     let watch refresh =
+      let sw = Current.Engine_env.get_sw () in
       let watch_dir = dot_git in
       Log.debug (fun f -> f "Installing watch for %a" Fpath.pp watch_dir);
-      Irmin_watcher.hook (next_id ()) (Fpath.to_string watch_dir) (fun path ->
+      let unwatch =
+        Fs_watcher.hook ~sw (Fpath.to_string watch_dir) (fun path ->
           if path = "HEAD" then (
             Log.info (fun f -> f "Detected change in %S" path);
-            refresh ();
+            refresh ()
           ) else (
-            Log.debug (fun f -> f "Ignoring change in %S" path);
-          );
-          Lwt.return_unit
-        )
-      >|= fun unwatch ->
+            Log.debug (fun f -> f "Ignoring change in %S" path)
+          ))
+      in
       Log.debug (fun f -> f "Watch installed for %a" Fpath.pp watch_dir);
       fun () ->
         Log.debug (fun f -> f "Unwatching %a" Fpath.pp watch_dir);

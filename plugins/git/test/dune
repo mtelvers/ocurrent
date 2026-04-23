@@ -5,4 +5,4 @@
 (test
  (name git_test)
  (package current_git)
- (libraries alcotest alcotest-lwt current current_git lwt))
+ (libraries alcotest current current_git eio eio_main))

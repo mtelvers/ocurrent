@@ -101,25 +101,25 @@ This package provides primitives for interacting with Git.
 It can pull from remote repositories, or monitor local ones for changes.")
  (depends
   (current (= :version))
-  (ocaml (>= 4.12.0))
+  (ocaml (>= 5.0.0))
   (astring (>= 0.8.5))
   (base64 (>= 3.1.0))
   (bos (>= 0.2.0))
   conf-git
   (cstruct (>= 6.0.0))
+  digestif
+  (eio (>= 1.0))
+  eio_main
   (fmt (>= 0.8.9))
   (fpath (>= 0.7.3))
-  irmin-watcher
+  inotify-eio
   (logs (>= 0.7.0))
-  (lwt (>= 5.7))
-  (mirage-crypto (and (>= 0.8.0) (< 1.0.0)))
   ppx_deriving
   (ppx_deriving_yojson (>= 3.5.1))
   (result (>= 1.5))
   yojson
   (mdx :with-test)
-  (alcotest (and :with-test (>= 1.2.0)))
-  (alcotest-lwt (and :with-test (>= 1.2.0)))))
+  (alcotest (and :with-test (>= 1.2.0)))))
 
 (package
  (name current_web)

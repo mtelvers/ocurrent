@@ -1,5 +1,3 @@
-open Lwt.Infix
-
 module Metrics = struct
   open Prometheus
 
@@ -16,19 +14,13 @@ let dir_exists d =
   | Ok x -> x
   | Error (`Msg x) -> failwith x
 
-let hexchars = "0123456789abcdef"
-
-let pp_hex f d =
-  for x = 0 to Cstruct.length d - 1 do
-    let byte = Cstruct.get_uint8 d x in
-    Fmt.pf f "%02x" byte
-  done
-
 let id_of_repo repo =
-  let module Hash = Mirage_crypto.Hash.SHA256 in
   let base = Filename.basename repo in
-  let digest = Hash.digest (Cstruct.of_string repo) in
-  Fmt.str "%s-%a" base pp_hex digest
+  let digest =
+    Digestif.SHA256.digest_string repo
+    |> Digestif.SHA256.to_hex
+  in
+  Fmt.str "%s-%s" base digest
 
 (* .../var/git/myrepo-hhh *)
 let local_copy repo =
@@ -47,8 +39,8 @@ let git ~cancellable ~job ?cwd ?env ?config args =
           List.map (fun config -> ["-c" ; config]) config
           |> List.flatten
   in
-  let cmd = Array.of_list ("git" :: config @ args) in
-  Current.Process.exec ~cancellable ?env ~job ("", cmd)
+  let cmd = "git" :: config @ args in
+  Current.Process.exec ~cancellable ?env ~job cmd
 
 (*  This command manipulates paths. It requires [protocol.file.allow=always] to
     be set to make sure we can update the submodules.
@@ -76,11 +68,12 @@ let git_remote_set_url ~job ~repo ~remote url =
 
 let git_rev_parse ?(cancellable=false) ~job ~repo x =
   let cmd = ["git"; "-C"; Fpath.to_string repo; "rev-parse"; x] in
-  Current.Process.check_output ~cancellable ~job ("", Array.of_list cmd) >|= Stdlib.Result.map String.trim
+  Current.Process.check_output ~cancellable ~job cmd
+  |> Stdlib.Result.map String.trim
 
 let cp_r ~cancellable ~job ~src ~dst =
-  let cmd = [| "cp"; "-a"; "--"; Fpath.to_string src; Fpath.to_string dst |] in
-  Current.Process.exec ~cancellable ~job ("", cmd)
+  let cmd = ["cp"; "-a"; "--"; Fpath.to_string src; Fpath.to_string dst] in
+  Current.Process.exec ~cancellable ~job cmd
 
 let git_submodule_sync ~cancellable ~job ~repo =
   git ~cancellable ~job ~cwd:repo ["submodule"; "sync"]
