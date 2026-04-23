@@ -1,6 +1,7 @@
-(* HTTPS client helper.  Wraps cohttp-eio + tls-eio with a small API that
-   mirrors the cohttp-lwt-unix call surface, so the github plugin's call
-   sites stay close to their original shape. *)
+(* HTTPS client helper shared between OCurrent plugins.  Wraps
+   cohttp-eio + tls-eio with a small API shaped like cohttp-lwt-unix's
+   so that plugins can port mechanically from the Lwt version.
+   Trusts the system CA bundle via Ca_certs. *)
 
 let authenticator = lazy (
   match Ca_certs.authenticator () with
@@ -39,4 +40,10 @@ let post ?(headers=Cohttp.Header.init ()) ?body uri =
   Eio.Switch.run @@ fun sw ->
   let body = Option.map Cohttp_eio.Body.of_string body in
   let resp, body = Cohttp_eio.Client.post (client ()) ~sw ~headers ?body uri in
+  resp, read_body body
+
+let patch ?(headers=Cohttp.Header.init ()) ?body uri =
+  Eio.Switch.run @@ fun sw ->
+  let body = Option.map Cohttp_eio.Body.of_string body in
+  let resp, body = Cohttp_eio.Client.patch (client ()) ~sw ~headers ?body uri in
   resp, read_body body

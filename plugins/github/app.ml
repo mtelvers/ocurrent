@@ -73,8 +73,8 @@ let http { app_id; key; _ } op uri =
              (Cohttp.Code.string_of_status err)
              body
 
-let get ~headers uri = Http.get ~headers uri
-let post ~headers uri = Http.post ~headers uri
+let get ~headers uri = Current_http.get ~headers uri
+let post ~headers uri = Current_http.post ~headers uri
 
 let minute = 60.0
 

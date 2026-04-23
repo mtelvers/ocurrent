@@ -49,7 +49,7 @@ let list_repositories ~api ~token ~account =
   let headers = Cohttp.Header.add headers "accept" "application/vnd.github.machine-man-preview+json" in
   let rec aux uri =
     Log.debug (fun f -> f "Get repositories for %S from %a" account Uri.pp uri);
-    let resp, body = Http.get ~headers uri in
+    let resp, body = Current_http.get ~headers uri in
     match Cohttp.Response.status resp with
     | `OK ->
       let json = Yojson.Safe.from_string body in

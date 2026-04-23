@@ -36,7 +36,7 @@ let make_login_uri t ~csrf =
 
 let get_access_token t ~state code =
   let headers = Cohttp.Header.init_with "Accept" "application/json" in
-  let resp, body = Http.post ~headers (Endpoint.access_token t ~state code) in
+  let resp, body = Current_http.post ~headers (Endpoint.access_token t ~state code) in
   match Cohttp.Response.status resp with
   | `OK ->
     let json = Yojson.Safe.from_string body in
@@ -45,7 +45,7 @@ let get_access_token t ~state code =
 
 let get_user token =
   let headers = Cohttp.Header.init_with "Authorization" ("token " ^ token) in
-  let resp, body = Http.get ~headers Endpoint.user in
+  let resp, body = Current_http.get ~headers Endpoint.user in
   match Cohttp.Response.status resp with
   | `OK ->
     let json = Yojson.Safe.from_string body in
