@@ -1,5 +1,3 @@
-open Lwt.Infix
-
 type t = Uri.t
 
 let id = "slack-post"
@@ -9,23 +7,17 @@ module Value = Current.String
 module Outcome = Current.Unit
 
 let publish t job _key message =
-  Current.Job.start job ~level:Current.Level.Above_average >>= fun () ->
-  let headers = Cohttp.Header.of_list [
-      "Content-type", "application/json";
-    ]
-  in
-  let body = `Assoc [
-      "text", `String message;
-    ]
+  Current.Job.start job ~level:Current.Level.Above_average;
+  let headers = Cohttp.Header.init_with "Content-type" "application/json" in
+  let body =
+    `Assoc [ "text", `String message ]
     |> Yojson.to_string
-    |> Cohttp_lwt.Body.of_string
   in
-  Cohttp_lwt_unix.Client.post ~headers ~body t >>= fun (resp, _body) ->
-  match resp.Cohttp.Response.status with
-  | `OK -> Lwt.return @@ Ok ()
+  let resp, _body = Current_http.post ~headers ~body t in
+  match Cohttp.Response.status resp with
+  | `OK -> Ok ()
   | err ->
-     Lwt.return @@ Fmt.error_msg "Slack post failed: %s" (Cohttp.Code.string_of_status err)
-
+    Fmt.error_msg "Slack post failed: %s" (Cohttp.Code.string_of_status err)
 
 let pp f (key, value) = Fmt.pf f "Post %s: %s" key value
 

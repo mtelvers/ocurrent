@@ -2,13 +2,12 @@
  (public_name current_slack)
  (name current_slack)
  (libraries
-  cohttp-lwt-unix
+  cohttp
   current
   current.cache
+  current.http
   current_term
   fmt
   logs
-  lwt
-  lwt.unix
   uri
   yojson))

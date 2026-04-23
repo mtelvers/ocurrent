@@ -290,12 +290,9 @@ This package provides primitives for interacting with Slack.
 It can post messages to slack channels.")
  (depends
   (current (= :version))
-  (ocaml (>= 4.12.0))
-  (cohttp-lwt-unix (>= 6.0.0))
+  (ocaml (>= 5.0.0))
   (fmt (>= 0.8.9))
   (logs (>= 0.7.0))
-  (lwt (>= 5.7))
-  (tls-lwt (>= 0.16.0))
   (uri (>= 4.0.0))
   yojson))
 
