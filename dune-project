@@ -319,7 +319,7 @@ This package provides a plugin for running ssh commands.")
  (maintainers "Mark Elvers <mark.elvers@tunbury.org>")
  (depends
   (current (= :version))
-  (ocaml (>= 4.12.0))
+  (ocaml (>= 5.0.0))
   yojson))
 
 (package
