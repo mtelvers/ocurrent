@@ -44,25 +44,25 @@ depends: [
   "dune" {>= "3.3"}
   "crunch" {build & >= "3.3.0"}
   "current" {= version}
-  "ocaml" {>= "4.12.0"}
+  "ocaml" {>= "5.0.0"}
   "ansi" {>= "0.5.0"}
   "astring" {>= "0.8.5"}
   "base64"
   "bos"
   "cmdliner" {>= "1.1.0"}
-  "cohttp-lwt-unix" {>= "6.0.0"}
-  "conduit-lwt-unix" {>= "2.2.2"}
+  "cohttp-eio" {>= "6.0.0"}
   "conf-graphviz"
   "cstruct" {>= "5.2.0"}
   "csv" {>= "2.4"}
+  "digestif"
+  "eio" {>= "1.0"}
   "fmt" {>= "0.8.9"}
   "fpath" {>= "0.7.3"}
   "logs" {>= "0.7.0"}
-  "lwt" {>= "5.7"}
-  "mirage-crypto" {>= "0.8.7" & < "1.0.0"}
-  "mirage-crypto-rng" {>= "0.11.0" & < "1.0.0"}
-  "mirage-crypto-rng-lwt" {>= "0.11.0" & < "1.0.0"}
-  "multipart_form-lwt" {>= "0.4.0"}
+  "magic-mime"
+  "mirage-crypto" {>= "1.0"}
+  "mirage-crypto-rng" {>= "1.0"}
+  "multipart_form" {>= "0.4.0"}
   "ppx_deriving" {>= "5.1"}
   "ppx_deriving_yojson" {>= "3.5.1"}
   "ppx_sexp_conv" {>= "v0.14.1"}
@@ -71,8 +71,6 @@ depends: [
   "re" {>= "1.9.0"}
   "result" {>= "1.5"}
   "routes" {>= "2.0.0"}
-  "session"
-  "session-cohttp-lwt"
   "sexplib" {>= "v0.14.0"}
   "sqlite3" {>= "5.0.2"}
   "tyxml" {>= "4.6.0"}

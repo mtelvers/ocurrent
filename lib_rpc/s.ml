@@ -32,7 +32,7 @@ module type CURRENT = sig
     module Map : Map.S with type key = string
     val log_path : string -> (Fpath.t, [`Msg of string]) result
     val lookup_running : string -> t option
-    val wait_for_log_data : t -> unit Lwt.t
+    val wait_for_log_data : t -> unit
     val approve_early_start : t -> unit
     val cancel : t -> string -> unit
     val cancelled_state : t -> (unit, [`Msg of string]) result

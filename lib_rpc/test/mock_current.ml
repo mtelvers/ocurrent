@@ -52,8 +52,7 @@ module Job = struct
   let lookup_running job_id =
     Map.find_opt job_id !jobs
 
-  let wait_for_log_data _job =
-    Lwt.return_unit
+  let wait_for_log_data _job = ()
 
   let approve_early_start _job = ()
 

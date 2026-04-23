@@ -20,6 +20,7 @@
   current.cache
   current_term
   csv
+  digestif
   ansi
   eio
   eio.unix
@@ -36,8 +37,6 @@
   re
   result
   routes
-  session
-  session-cohttp
   sexplib
   sqlite3
   tyxml

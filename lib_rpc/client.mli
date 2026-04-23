@@ -1,67 +1,35 @@
 (** Unified RPC client for OCurrent pipelines.
 
     This module provides client operations and cmdliner integration for
-    interacting with OCurrent pipelines via Cap'n Proto RPC.
-
-    {2 Usage in Applications}
-
-    To embed client commands in your application:
-
-    {[
-      let () =
-        let main_cmd = (* your main command *) in
-        let client_cmd = Current_rpc.Client.Cmdliner.client_cmd
-          ~name:"client"
-          ~cap_file:"/path/to/default.cap"
-          ()
-        in
-        let cmd = Cmd.group info [main_cmd; client_cmd] in
-        exit @@ Cmd.eval cmd
-    ]}
-
-    Then users can run:
-    {v
-      myapp client overview
-      myapp client jobs
-      myapp client log <job-id>
-    v}
-
-    {2 Standalone Client}
-
-    For a standalone client binary:
-
-    {[
-      let () =
-        let cmd = Current_rpc.Client.Cmdliner.standalone_cmd ~name:"rpc-client" () in
-        exit @@ Cmd.eval cmd
-    ]}
-*)
+    interacting with OCurrent pipelines via Cap'n Proto RPC. *)
 
 (** {2 Client Operations}
 
     These functions perform individual RPC operations. They can be used
-    directly if you need programmatic access rather than CLI. *)
+    directly if you need programmatic access rather than CLI.
+    Each operation is synchronous: it runs on the current fiber and
+    suspends while waiting for the remote call. *)
 
 module Ops : sig
-  val overview : Engine.t -> (unit, [> `Capnp of Capnp_rpc.Error.t]) result Lwt.t
+  val overview : Engine.t -> (unit, [> `Capnp of Capnp_rpc.Error.t]) result
   (** Show pipeline statistics and state. *)
 
-  val jobs : Engine.t -> (unit, [> `Capnp of Capnp_rpc.Error.t]) result Lwt.t
+  val jobs : Engine.t -> (unit, [> `Capnp of Capnp_rpc.Error.t]) result
   (** List active jobs. *)
 
-  val status : Engine.t -> string -> (unit, [> `Capnp of Capnp_rpc.Error.t]) result Lwt.t
+  val status : Engine.t -> string -> (unit, [> `Capnp of Capnp_rpc.Error.t]) result
   (** [status engine job_id] shows the status of a specific job. *)
 
-  val log : Engine.t -> string -> (unit, [> `Capnp of Capnp_rpc.Error.t]) result Lwt.t
+  val log : Engine.t -> string -> (unit, [> `Capnp of Capnp_rpc.Error.t]) result
   (** [log engine job_id] streams the log of a job. *)
 
-  val cancel : Engine.t -> string -> (unit, [> `Capnp of Capnp_rpc.Error.t]) result Lwt.t
+  val cancel : Engine.t -> string -> (unit, [> `Capnp of Capnp_rpc.Error.t]) result
   (** [cancel engine job_id] cancels a running job. *)
 
-  val rebuild : Engine.t -> string -> (unit, [> `Capnp of Capnp_rpc.Error.t]) result Lwt.t
+  val rebuild : Engine.t -> string -> (unit, [> `Capnp of Capnp_rpc.Error.t]) result
   (** [rebuild engine job_id] rebuilds a job and streams its log. *)
 
-  val start : Engine.t -> string -> (unit, [> `Capnp of Capnp_rpc.Error.t]) result Lwt.t
+  val start : Engine.t -> string -> (unit, [> `Capnp of Capnp_rpc.Error.t]) result
   (** [start engine job_id] approves early start for a waiting job. *)
 
   val query :
@@ -70,74 +38,51 @@ module Ops : sig
     ok:bool option ->
     rebuild:bool option ->
     job_prefix:string option ->
-    (unit, [> `Capnp of Capnp_rpc.Error.t]) result Lwt.t
+    (unit, [> `Capnp of Capnp_rpc.Error.t]) result
   (** Query job history with optional filters. *)
 
-  val ops : Engine.t -> (unit, [> `Capnp of Capnp_rpc.Error.t]) result Lwt.t
+  val ops : Engine.t -> (unit, [> `Capnp of Capnp_rpc.Error.t]) result
   (** List operation types. *)
 
-  val dot : Engine.t -> (unit, [> `Capnp of Capnp_rpc.Error.t]) result Lwt.t
+  val dot : Engine.t -> (unit, [> `Capnp of Capnp_rpc.Error.t]) result
   (** Output pipeline as DOT graph. *)
 
-  val confirm : Engine.t -> string option -> (unit, [> `Capnp of Capnp_rpc.Error.t]) result Lwt.t
+  val confirm : Engine.t -> string option -> (unit, [> `Capnp of Capnp_rpc.Error.t]) result
   (** [confirm engine None] gets the current level; [confirm engine (Some level)] sets it. *)
 
-  val rebuild_all : Engine.t -> string list -> (unit, [> `Capnp of Capnp_rpc.Error.t]) result Lwt.t
+  val rebuild_all : Engine.t -> string list -> (unit, [> `Capnp of Capnp_rpc.Error.t]) result
   (** Rebuild multiple jobs. *)
 end
 
 (** {2 Connection Helpers} *)
 
-val connect : Uri.t -> Engine.t Lwt.t
-(** [connect cap_uri] connects to an engine using a capability URI. *)
+val connect :
+  sw:Eio.Switch.t ->
+  net:_ Eio.Net.t ->
+  Uri.t ->
+  Engine.t
+(** [connect ~sw ~net cap_uri] connects to an engine using a capability URI. *)
 
-val with_engine : Uri.t -> (Engine.t -> 'a Lwt.t) -> 'a Lwt.t
-(** [with_engine cap_uri f] connects to an engine, runs [f], then disconnects. *)
+val with_engine :
+  sw:Eio.Switch.t ->
+  net:_ Eio.Net.t ->
+  Uri.t ->
+  (Engine.t -> 'a) ->
+  'a
+(** [with_engine ~sw ~net cap_uri f] connects to an engine, runs [f], then
+    releases the capability. *)
 
 (** {2 Cmdliner Integration} *)
 
 module Cmdliner : sig
   val cap_uri : Uri.t Cmdliner.Term.t
-  (** Term for the --cap/-c option to specify the capability file/URI. *)
+  (** Term for the --cap option to specify the capability file/URI. *)
 
-  val client_cmd : ?name:string -> ?cap_file:string -> unit -> unit Cmdliner.Cmd.t
-  (** [client_cmd ?name ?cap_file ()] creates a command group with all client subcommands.
+  val make_subcommands : Uri.t Cmdliner.Term.t -> unit Cmdliner.Cmd.t list
+  (** [make_subcommands cap_uri] builds the client subcommands parameterised
+      by the cap_uri term. *)
 
-      @param name The command name (default: "client")
-      @param cap_file Default capability file path. If provided, --cap becomes optional.
-
-      Use this to embed client commands in your application:
-      {[
-        let cmd = Cmd.group info [main_cmd; Current_rpc.Client.Cmdliner.client_cmd ()]
-      ]} *)
-
-  val standalone_cmd : ?name:string -> unit -> unit Cmdliner.Cmd.t
-  (** [standalone_cmd ?name ()] creates a standalone client command.
-
-      @param name The program name (default: "ocurrent-rpc")
-
-      Use this to create a standalone client binary:
-      {[
-        let () = exit @@ Cmd.eval (Current_rpc.Client.Cmdliner.standalone_cmd ())
-      ]} *)
-
-  (** {3 Individual Subcommands}
-
-      These are exposed in case you want to cherry-pick specific commands. *)
-
-  val overview_cmd : unit Cmdliner.Cmd.t
-  val jobs_cmd : unit Cmdliner.Cmd.t
-  val status_cmd : unit Cmdliner.Cmd.t
-  val log_cmd : unit Cmdliner.Cmd.t
-  val cancel_cmd : unit Cmdliner.Cmd.t
-  val rebuild_cmd : unit Cmdliner.Cmd.t
-  val start_cmd : unit Cmdliner.Cmd.t
-  val query_cmd : unit Cmdliner.Cmd.t
-  val ops_cmd : unit Cmdliner.Cmd.t
-  val dot_cmd : unit Cmdliner.Cmd.t
-  val confirm_cmd : unit Cmdliner.Cmd.t
-  val rebuild_all_cmd : unit Cmdliner.Cmd.t
-
-  val subcommands : unit Cmdliner.Cmd.t list
-  (** All client subcommands as a list. *)
+  val cmd : string -> string -> unit Cmdliner.Cmd.t
+  (** [cmd name version] is a command group with all client subcommands,
+      using the standard --cap option. *)
 end

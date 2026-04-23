@@ -1,5 +1,3 @@
-open Lwt.Infix
-
 let max_log_chunk_size = 102400L  (* 100K at a time *)
 
 let read ~start path =
@@ -17,7 +15,7 @@ let read ~start path =
 (** Functor that takes both Current and Db modules.
     Used internally and for testing with mock databases. *)
 module Make_with_db (Current : S.CURRENT) (Db : S.DB) = struct
-  open Capnp_rpc_lwt
+  open Capnp_rpc
 
   (* Helper functions for level conversion *)
   let level_to_capnp level =
@@ -43,17 +41,18 @@ module Make_with_db (Current : S.CURRENT) (Db : S.DB) = struct
 
     let stream_log_data ~job_id ~start =
       match Current.Job.log_path job_id with
-      | Error `Msg m -> Lwt_result.fail (`Capnp (`Exception (Capnp_rpc.Exception.v m)))
+      | Error `Msg m -> Error (`Capnp (`Exception (Capnp_rpc.Exception.v m)))
       | Ok path ->
         let rec aux () =
           match read ~start path with
           | ("", _) as x ->
             begin match Current.Job.lookup_running job_id with
-              | None -> Lwt_result.return x
+              | None -> Ok x
               | Some job ->
-                Current.Job.wait_for_log_data job >>= aux
+                Current.Job.wait_for_log_data job;
+                aux ()
             end
-          | x -> Lwt_result.return x
+          | x -> Ok x
         in
         aux ()
 
@@ -77,14 +76,14 @@ module Make_with_db (Current : S.CURRENT) (Db : S.DB) = struct
               release_param_caps ();
               let start = Params.start_get params in
               Log.info (fun f -> f "log(%S, %Ld)" job_id start);
-              Service.return_lwt @@ fun () ->
-              stream_log_data ~job_id ~start >|= function
-              | Error _ as e -> e
+              match stream_log_data ~job_id ~start with
+              | Error (`Capnp (`Exception ex)) -> Service.error (`Exception ex)
+              | Error (`Capnp _) -> Service.fail "Log streaming failed"
               | Ok (log, next) ->
                 let response, results = Service.Response.create Results.init_pointer in
                 Results.log_set results log;
                 Results.next_set results next;
-                Ok response
+                Service.return response
 
             method rebuild_impl _params release_param_caps =
               release_param_caps ();
@@ -100,11 +99,10 @@ module Make_with_db (Current : S.CURRENT) (Db : S.DB) = struct
                   let new_job = local engine (rebuild ()) in
                   Results.job_set results (Some new_job);
                   Capability.dec_ref new_job;
-                  Service.return_lwt @@ fun () ->
                   (* Allow the engine to re-evaluate, so the job will appear
                      active to the caller immediately. *)
-                  Lwt.pause () >|= fun () ->
-                  Ok response
+                  Eio.Fiber.yield ();
+                  Service.return response
 
             method cancel_impl _params release_param_caps =
               release_param_caps ();

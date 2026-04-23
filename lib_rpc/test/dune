@@ -2,18 +2,15 @@
  (name test_rpc)
  (libraries
   alcotest
-  alcotest-lwt
   astring
   bos
-  capnp-rpc-lwt
+  capnp-rpc
   current_rpc
   current_term
   fmt
   fpath
   logs
-  logs.fmt
-  lwt
-  lwt.unix))
+  logs.fmt))
 
 (rule
  (alias runtest)

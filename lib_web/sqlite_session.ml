@@ -4,6 +4,8 @@ type key = string
 type value = string
 type period = int64
 
+type error = Not_found | Not_set
+
 let default_period = Int64.of_int (60 * 60 * 24 * 7)
 
 type t = {
@@ -15,7 +17,7 @@ type t = {
 }
 
 let gensym () =
-  Base64.encode_exn (Cstruct.to_string (Mirage_crypto_rng.generate 30))
+  Base64.encode_exn (Mirage_crypto_rng.generate 30)
 
 let or_fail label x =
   match x with
@@ -33,15 +35,15 @@ let expire_old t =
 
 let get t key =
   match Db.query_some t.get Sqlite3.Data.[ TEXT key ] with
-  | None -> Error Session.S.Not_found
+  | None -> Error Not_found
   | Some Sqlite3.Data.[ value; INT expires ] ->
     let period = Int64.(sub expires (now ())) in
     if Int64.compare period 0L < 0 then (
       clear t key;
-      Error Session.S.Not_found
+      Error Not_found
     ) else (
       match value with
-      | NULL       -> Error Session.S.Not_set
+      | NULL       -> Error Not_set
       | TEXT value -> Ok (value, period)
       | _ -> Fmt.failwith "Invalid value in row!"
     )

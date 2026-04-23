@@ -143,13 +143,14 @@ logs and configuring the log analyser.")
   conf-graphviz
   (cstruct (>= 5.2.0))
   (csv (>= 2.4))
+  digestif
   (eio (>= 1.0))
   (fmt (>= 0.8.9))
   (fpath (>= 0.7.3))
   (logs (>= 0.7.0))
   magic-mime
-  (mirage-crypto (and (>= 0.8.7) (< 1.0.0)))
-  (mirage-crypto-rng (and (>= 0.11.0) (< 1.0.0)))
+  (mirage-crypto (>= 1.0))
+  (mirage-crypto-rng (>= 1.0))
   (multipart_form (>= 0.4.0))
   (ppx_deriving (>= 5.1))
   (ppx_deriving_yojson (>= 3.5.1))
@@ -159,8 +160,6 @@ logs and configuring the log analyser.")
   (re (>= 1.9.0))
   (result (>= 1.5))
   (routes (>= 2.0.0))
-  session
-  session-cohttp
   (sexplib (>= v0.14.0))
   (sqlite3 (>= 5.0.2))
   (tyxml (>= 4.6.0))
@@ -270,21 +269,21 @@ OCurrent provides an OCaml eDSL for writing CI/CD pipelines.
 This package provides a Cap'n Proto RPC interface, allowing
 an OCurrent engine to be controlled remotely.")
  (depends
-  (ocaml (>= 4.12.0))
+  (ocaml (>= 5.0.0))
   (current (= :version))
   (capnp (>= 3.4.0))
-  (capnp-rpc (and (>= 1.2.3) (< 2.0)))
-  (capnp-rpc-lwt (and (>= 1.2.3) (< 2.0)))
-  (capnp-rpc-unix (and (>= 1.2.3) (< 2.0)))
+  (capnp-rpc (>= 2.0))
+  (capnp-rpc-net (>= 2.0))
+  (capnp-rpc-unix (>= 2.0))
+  (eio (>= 1.0))
+  eio_main
   (fmt (>= 0.8.9))
   fpath
   (logs (>= 0.7.0))
-  (lwt (>= 5.7))
   (prometheus-app (>= 1.2))
   (result (>= 1.5))
   (stdint (>= 0.7.0))
-  (alcotest :with-test)
-  (alcotest-lwt :with-test))
+  (alcotest :with-test))
  (conflicts
   (x509 (= 0.11.0))))
 

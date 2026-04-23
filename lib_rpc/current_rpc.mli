@@ -1,7 +1,7 @@
 module Job : sig
   (** Client-side API to contact a job service. *)
 
-  type t = [`Job_8397ef9078537247] Capnp_rpc_lwt.Capability.t
+  type t = [`Job_8397ef9078537247] Capnp_rpc.Capability.t
   type id = string
 
   type status = {
@@ -11,16 +11,16 @@ module Job : sig
     can_rebuild : bool;
   }
 
-  val log : start:int64 -> t -> (string * int64, [> `Capnp of Capnp_rpc.Error.t]) result Lwt.t
+  val log : start:int64 -> t -> (string * int64, [> `Capnp of Capnp_rpc.Error.t]) result
   (** [log ~start t] returns bytes from the log starting at offset [start]. *)
 
-  val cancel : t -> (unit, [> `Capnp of Capnp_rpc.Error.t]) result Lwt.t
-  val status : t -> (status, [> `Capnp of Capnp_rpc.Error.t]) result Lwt.t
+  val cancel : t -> (unit, [> `Capnp of Capnp_rpc.Error.t]) result
+  val status : t -> (status, [> `Capnp of Capnp_rpc.Error.t]) result
 
   val rebuild : t -> t
   (** [rebuild t] requests a rebuild of [t] and returns the new job. *)
 
-  val approve_early_start : t -> (unit, [> `Capnp of Capnp_rpc.Error.t]) result Lwt.t
+  val approve_early_start : t -> (unit, [> `Capnp of Capnp_rpc.Error.t]) result
   (** Mark the job as approved to start even if the global confirmation threshold
       would otherwise prevent it. Calling this more than once has no effect. *)
 end
@@ -28,11 +28,11 @@ end
 module Engine : sig
   (** Client-side API to contact an engine service. *)
 
-  type t = [`Engine_f0961466d2f9bbf5] Capnp_rpc_lwt.Capability.t
+  type t = [`Engine_f0961466d2f9bbf5] Capnp_rpc.Capability.t
 
   (** {2 Existing Methods} *)
 
-  val active_jobs : t -> (Job.id list, [> `Capnp of Capnp_rpc.Error.t]) result Lwt.t
+  val active_jobs : t -> (Job.id list, [> `Capnp of Capnp_rpc.Error.t]) result
   (** [active_jobs t] lists the OCurrent jobs that are still being used in the pipeline.
       This includes completed jobs, as long as OCurrent is still ensuring they are up-to-date. *)
 
@@ -60,11 +60,11 @@ module Engine : sig
     rebuild : bool;                      (** Whether a rebuild was requested *)
   }
 
-  val query : t -> query_params -> (history_entry list, [> `Capnp of Capnp_rpc.Error.t]) result Lwt.t
+  val query : t -> query_params -> (history_entry list, [> `Capnp of Capnp_rpc.Error.t]) result
   (** [query t params] queries the job history database with the given filters.
       Returns matching entries sorted by finished time (most recent first). *)
 
-  val ops : t -> (string list, [> `Capnp of Capnp_rpc.Error.t]) result Lwt.t
+  val ops : t -> (string list, [> `Capnp of Capnp_rpc.Error.t]) result
   (** [ops t] lists all known operation types (e.g., "docker-build", "git-clone"). *)
 
   (** {2 Pipeline Overview} *)
@@ -83,24 +83,24 @@ module Engine : sig
     | Failed of string
     | Active of [ `Ready | `Running | `Waiting_for_confirmation ]
 
-  val pipeline_stats : t -> (stats, [> `Capnp of Capnp_rpc.Error.t]) result Lwt.t
+  val pipeline_stats : t -> (stats, [> `Capnp of Capnp_rpc.Error.t]) result
   (** [pipeline_stats t] returns counts of pipeline stages in each state. *)
 
-  val pipeline_state : t -> (pipeline_state, [> `Capnp of Capnp_rpc.Error.t]) result Lwt.t
+  val pipeline_state : t -> (pipeline_state, [> `Capnp of Capnp_rpc.Error.t]) result
   (** [pipeline_state t] returns the overall pipeline state. *)
 
-  val pipeline_dot : t -> (string, [> `Capnp of Capnp_rpc.Error.t]) result Lwt.t
+  val pipeline_dot : t -> (string, [> `Capnp of Capnp_rpc.Error.t]) result
   (** [pipeline_dot t] returns the pipeline graph in Graphviz DOT format. *)
 
   (** {2 Configuration} *)
 
   type confirm_level = Harmless | Mostly_harmless | Average | Above_average | Dangerous
 
-  val get_confirm_level : t -> (confirm_level option, [> `Capnp of Capnp_rpc.Error.t]) result Lwt.t
+  val get_confirm_level : t -> (confirm_level option, [> `Capnp of Capnp_rpc.Error.t]) result
   (** [get_confirm_level t] returns the current confirmation threshold, or [None] if
       no confirmation is required. *)
 
-  val set_confirm_level : t -> confirm_level option -> (unit, [> `Capnp of Capnp_rpc.Error.t]) result Lwt.t
+  val set_confirm_level : t -> confirm_level option -> (unit, [> `Capnp of Capnp_rpc.Error.t]) result
   (** [set_confirm_level t level] sets the confirmation threshold. Pass [None] to disable
       confirmation. *)
 
@@ -111,7 +111,7 @@ module Engine : sig
     failed : string list;
   }
 
-  val rebuild_all : t -> string list -> (rebuild_result, [> `Capnp of Capnp_rpc.Error.t]) result Lwt.t
+  val rebuild_all : t -> string list -> (rebuild_result, [> `Capnp of Capnp_rpc.Error.t]) result
   (** [rebuild_all t job_ids] attempts to rebuild multiple jobs at once. Returns lists of
       job IDs that succeeded or failed to be queued for rebuild. *)
 end

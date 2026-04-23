@@ -1,4 +1,4 @@
-open Capnp_rpc_lwt
+open Capnp_rpc
 
 type t = Api.Service.Engine.t Capability.t
 
@@ -9,7 +9,7 @@ module Engine = Api.Client.Engine
 let active_jobs t =
   let open Engine.ActiveJobs in
   let request = Capability.Request.create_no_args () in
-  Capability.call_for_value t method_id request |> Lwt_result.map Results.ids_get_list
+  Capability.call_for_value t method_id request |> Result.map Results.ids_get_list
 
 let job t id =
   let open Engine.Job in
@@ -109,18 +109,18 @@ let query t params =
   set_opt_bool (Api.Builder.QueryParams.ok_init qp) params.ok;
   set_opt_bool (Api.Builder.QueryParams.rebuild_init qp) params.rebuild;
   (match params.job_prefix with None -> () | Some jp -> Api.Builder.QueryParams.job_prefix_set qp jp);
-  Capability.call_for_value t method_id request |> Lwt_result.map @@ fun results ->
+  Capability.call_for_value t method_id request |> Result.map @@ fun results ->
   Results.entries_get_list results |> List.map history_entry_of_capnp
 
 let ops t =
   let open Engine.Ops in
   let request = Capability.Request.create_no_args () in
-  Capability.call_for_value t method_id request |> Lwt_result.map Results.ops_get_list
+  Capability.call_for_value t method_id request |> Result.map Results.ops_get_list
 
 let pipeline_stats t =
   let open Engine.PipelineStats in
   let request = Capability.Request.create_no_args () in
-  Capability.call_for_value t method_id request |> Lwt_result.map @@ fun results ->
+  Capability.call_for_value t method_id request |> Result.map @@ fun results ->
   let s = Results.stats_get results in
   {
     ok = Api.Reader.PipelineStats.ok_get_int_exn s;
@@ -134,7 +134,7 @@ let pipeline_stats t =
 let pipeline_state t =
   let open Engine.PipelineState in
   let request = Capability.Request.create_no_args () in
-  Capability.call_for_value t method_id request |> Lwt_result.map @@ fun results ->
+  Capability.call_for_value t method_id request |> Result.map @@ fun results ->
   let s = Results.state_get results in
   match Api.Reader.PipelineState.get s with
   | Api.Reader.PipelineState.Success -> Success
@@ -151,12 +151,12 @@ let pipeline_state t =
 let pipeline_dot t =
   let open Engine.PipelineDot in
   let request = Capability.Request.create_no_args () in
-  Capability.call_for_value t method_id request |> Lwt_result.map Results.dot_get
+  Capability.call_for_value t method_id request |> Result.map Results.dot_get
 
 let get_confirm_level t =
   let open Engine.GetConfirmLevel in
   let request = Capability.Request.create_no_args () in
-  Capability.call_for_value t method_id request |> Lwt_result.map @@ fun results ->
+  Capability.call_for_value t method_id request |> Result.map @@ fun results ->
   if Results.is_set_get results then
     Some (capnp_to_level (Results.level_get results))
   else
@@ -177,7 +177,7 @@ let rebuild_all t job_ids =
   let open Engine.RebuildAll in
   let request, params = Capability.Request.create Params.init_pointer in
   Params.job_ids_set_list params job_ids |> ignore;
-  Capability.call_for_value t method_id request |> Lwt_result.map @@ fun results ->
+  Capability.call_for_value t method_id request |> Result.map @@ fun results ->
   {
     succeeded = Results.succeeded_get_list results;
     failed = Results.failed_get_list results;

@@ -1,4 +1,4 @@
-let () = Mirage_crypto_rng_unix.initialize (module Mirage_crypto_rng.Fortuna)
+let () = Mirage_crypto_rng_unix.use_default ()
 
 let forbidden (ctx : Context.t) =
   match ctx.site.authn, ctx.user with
