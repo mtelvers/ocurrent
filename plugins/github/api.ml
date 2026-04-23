@@ -1,22 +1,24 @@
-open Lwt.Infix
 open Current.Syntax
 
 (* Limit updates to one at a time for now. *)
 let pool = Current.Pool.create ~label:"github" 1
 
-(* When we get a webhook event, we fire the condition for that repository `owner/name`, if any. *)
-let webhook_cond = Hashtbl.create 10
+(* When we get a webhook event, we fire the condition for that repository `owner/name`, if any.
+   The pair is (condition, mutex) — Eio conditions need a mutex for [await]. *)
+let webhook_cond : (string, Eio.Condition.t * Eio.Mutex.t) Hashtbl.t = Hashtbl.create 10
+
+let webhook_entry owner_name =
+  match Hashtbl.find_opt webhook_cond owner_name with
+  | Some c -> c
+  | None ->
+    let c = Eio.Condition.create (), Eio.Mutex.create () in
+    Hashtbl.add webhook_cond owner_name c;
+    c
 
 let await_event ~owner_name =
-  let cond =
-    match Hashtbl.find_opt webhook_cond owner_name with
-    | Some c -> c
-    | None ->
-      let c = Lwt_condition.create () in
-      Hashtbl.add webhook_cond owner_name c;
-      c
-  in
-  Lwt_condition.wait cond
+  let cond, mutex = webhook_entry owner_name in
+  Eio.Mutex.use_rw ~protect:false mutex (fun () ->
+    Eio.Condition.await cond mutex)
 
 type actions = < rebuild : (unit -> string) option; >
 
@@ -81,7 +83,7 @@ let rebuild_webhook ~engine ~event ~get_job_ids json =
 let input_webhook body =
   let owner_name = Yojson.Safe.Util.(body |> member "repository" |> member "full_name" |> to_string) in
   match Hashtbl.find_opt webhook_cond owner_name with
-  | Some cond -> Lwt_condition.broadcast cond ()
+  | Some (cond, _mutex) -> Eio.Condition.broadcast cond
   | None -> Log.info (fun f -> f "Got webhook event for %S, but we're not interested in that" owner_name)
 
 module Metrics = struct
@@ -374,10 +376,10 @@ type monitors = Repo_key.elt Monitors.t
 
 type t = {
   account : string;          (* Prometheus label used to report points. *)
-  get_token : unit -> token Lwt.t;
+  get_token : unit -> token;
   app_id : string option;
   webhook_secret : string; (* Shared secret for validating webhooks from GitHub *)
-  token_lock : Lwt_mutex.t;
+  token_lock : Eio.Mutex.t;
   mutable token : token;
   mutable monitors: monitors;
 }
@@ -395,11 +397,11 @@ let all_refs t = t.all_refs
 
 let v ~get_token ?app_id ~account ~webhook_secret () =
   let monitors = Monitors.empty in
-  let token_lock = Lwt_mutex.create () in
+  let token_lock = Eio.Mutex.create () in
   { get_token; token_lock; token = no_token; monitors; account; app_id; webhook_secret }
 
 let of_oauth ~token ~webhook_secret =
-  let get_token () = Lwt.return { token = Ok token; expiry = None} in
+  let get_token () = { token = Ok token; expiry = None} in
   v ~get_token ~account:"oauth" ~webhook_secret ()
 
 let get_cached_token t =
@@ -410,21 +412,21 @@ let get_cached_token t =
   | _ -> None
 
 let get_token t =
-  Lwt_mutex.with_lock t.token_lock @@ fun () ->
+  Eio.Mutex.use_rw ~protect:false t.token_lock @@ fun () ->
   let now = Unix.gettimeofday () in
   match t.token with
-  | { token; expiry = None } -> Lwt.return token
-  | { token; expiry = Some expiry } when now < expiry -> Lwt.return token
+  | { token; expiry = None } -> token
+  | { token; expiry = Some expiry } when now < expiry -> token
   | _ ->
     Log.info (fun f -> f "Getting API token");
-    Lwt.catch t.get_token
-      (fun ex ->
-         Log.warn (fun f -> f "Error getting GitHub token: %a" Fmt.exn ex);
-         let token = Error (`Msg "Failed to get GitHub token") in
-         let expiry = Some (now +. 60.0) in
-         Lwt.return {token; expiry}
-      )
-    >|= fun token ->
+    let token =
+      try t.get_token ()
+      with ex ->
+        Log.warn (fun f -> f "Error getting GitHub token: %a" Fmt.exn ex);
+        let token = Error (`Msg "Failed to get GitHub token") in
+        let expiry = Some (now +. 60.0) in
+        {token; expiry}
+    in
     t.token <- token;
     token.token
 
@@ -439,15 +441,12 @@ let exec_graphql ?variables t query =
        | Some v -> ["variables", `Assoc v])
     )
     |> Yojson.Safe.to_string
-    |> Cohttp_lwt.Body.of_string
   in
-  get_token t >>= function
+  match get_token t with
   | Error (`Msg m) -> failwith m
   | Ok token ->
     let headers = Cohttp.Header.init_with "Authorization" ("bearer " ^ token) in
-    Cohttp_lwt_unix.Client.post ~headers ~body graphql_endpoint >>=
-    fun (resp, body) ->
-    Cohttp_lwt.Body.to_string body >|= fun body ->
+    let resp, body = Http.post ~headers ~body graphql_endpoint in
     match Cohttp.Response.status resp with
     | `OK ->
       let json = Yojson.Safe.from_string body in
@@ -501,7 +500,7 @@ module Monitor (Query : GRAPHQL_QUERY) = struct
       "owner", `String repo_owner;
       "name", `String repo_name;
     ] in
-    exec_graphql t ~variables query >|= fun json ->
+    let json = exec_graphql t ~variables query in
     try
       let data = json / "data" in
       handle_rate_limit t "default_ref" (data / "rateLimit");
@@ -513,30 +512,33 @@ module Monitor (Query : GRAPHQL_QUERY) = struct
 
   let make_monitor t repo =
     let read () =
-      Lwt.catch
-        (fun () -> exec t repo >|= fun c -> Ok c)
-        (fun ex -> Lwt_result.fail @@ `Msg (Fmt.str "GitHub query %s for %a failed: %a" Query.name Repo_id.pp repo Fmt.exn ex))
+      try Ok (exec t repo)
+      with ex -> Error (`Msg (Fmt.str "GitHub query %s for %a failed: %a" Query.name Repo_id.pp repo Fmt.exn ex))
     in
     let watch refresh =
       let owner_name = Printf.sprintf "%s/%s" repo.owner repo.name in
-      let rec aux x =
-        Log.info (fun f -> f "Received webhook for owner/name: %s" owner_name);
-        x >>= fun () ->
-        let x = await_event ~owner_name in
-        refresh ();
-        Lwt_unix.sleep 10.0 >>= fun () ->   (* Limit updates to 1 per 10 seconds *)
-        aux x
-      in
-      let x = await_event ~owner_name in
-      let thread =
-        Lwt.catch
-          (fun () -> aux x)
-          (function
-            | Lwt.Canceled -> Lwt.return_unit (* could clear metrics here *)
-            | ex -> Log.err (fun f -> f "%s thread failed: %a" Query.name Fmt.exn ex); Lwt.return_unit
-          )
-      in
-      Lwt.return (fun () -> Lwt.cancel thread; Lwt.return_unit)
+      let stop = ref false in
+      Eio.Fiber.fork_daemon ~sw:(Current.Engine_env.get_sw ()) (fun () ->
+        let rec aux () =
+          if !stop then `Stop_daemon
+          else begin
+            (try
+               await_event ~owner_name;
+               Log.info (fun f -> f "Received webhook for owner/name: %s" owner_name);
+               refresh ();
+               Eio.Time.sleep (Current.Engine_env.clock ()) 10.0   (* Limit updates to 1 per 10 seconds *)
+             with ex ->
+               Log.err (fun f -> f "%s thread failed: %a" Query.name Fmt.exn ex));
+            aux ()
+          end
+        in
+        aux ()
+      );
+      fun () ->
+        stop := true;
+        (* Wake the daemon so it observes [stop]. *)
+        let cond, _ = webhook_entry owner_name in
+        Eio.Condition.broadcast cond
     in
     let pp f = Fmt.pf f "Watch %a %s" Repo_id.pp repo Query.name in
     Current.Monitor.create ~read ~watch ~pp
@@ -810,8 +812,8 @@ module CheckRun = struct
         Value.pp status
 
     let publish t job key status =
-      Current.Job.start job ~pool ~level:Current.Level.Above_average >>= fun () ->
-      get_token t >>= function
+      Current.Job.start job ~pool ~level:Current.Level.Above_average;
+      match get_token t with
       | Error (`Msg m) -> failwith m
       | Ok token ->
          let token = Github.Token.of_string token in
@@ -843,21 +845,25 @@ module CheckRun = struct
            Log.debug (fun f -> f "update_check: %s" body);
            Check.update_check_run ~token ~owner ~repo ~check_run_id ~body () in
 
-         Lwt.try_bind ( fun () ->
-             let open Github in
-             let open Monad in
-             run (
-               fetch_check_run () >>= function
-               | None -> create_check ()
-               | Some check_run -> update_check_run check_run ()))
-
-           (* Ignore the response and return unit. *)
-           (fun (_ : Github_j.check_run Github.Response.t) -> Lwt_result.return ())
-           (fun ex ->
-             Log.info (fun f -> f "@[<v2>%a failed: %a@]"
-                                  pp (key, status)
-                                  Fmt.exn ex);
-             Lwt_result.fail (`Msg "Failed to set GitHub status"))
+         (* The github-unix library is Lwt-based; use Lwt_eio.run_lwt to
+            bridge. Requires Lwt_eio.with_event_loop to be set up by the
+            application's main. *)
+         (try
+            let _ : _ Github.Response.t =
+              Lwt_eio.run_lwt (fun () ->
+                let open Github in
+                let open Monad in
+                run (
+                  fetch_check_run () >>= function
+                  | None -> create_check ()
+                  | Some check_run -> update_check_run check_run ()))
+            in
+            Ok ()
+          with ex ->
+            Log.info (fun f -> f "@[<v2>%a failed: %a@]"
+                                 pp (key, status)
+                                 Fmt.exn ex);
+            Error (`Msg "Failed to set GitHub status"))
 
   end
 
@@ -907,10 +913,10 @@ module Commit = struct
         Value.pp status
 
     let publish t job key status =
-      Current.Job.start job ~pool ~level:Current.Level.Above_average >>= fun () ->
+      Current.Job.start job ~pool ~level:Current.Level.Above_average;
       let {Key.commit; context} = key in
       let body = `Assoc (("context", `String context) :: Value.json_items status) in
-      get_token t >>= function
+      match get_token t with
       | Error (`Msg m) -> failwith m
       | Ok token ->
         let headers = Cohttp.Header.init_with "Authorization" ("bearer " ^ token) in
@@ -921,28 +927,22 @@ module Commit = struct
         Current.Job.log job "@[<v2>POST %a:@,%a@]"
           Uri.pp uri
           (Yojson.Safe.pretty_print ~std:true) body;
-        let body = body |> Yojson.Safe.to_string |> Cohttp_lwt.Body.of_string in
-        Lwt.try_bind
-          (fun () ->
-             Cohttp_lwt_unix.Client.post ~headers ~body uri >>= fun (resp, body) ->
-             Cohttp_lwt.Body.to_string body >|= fun body -> (resp, body)
-          )
-          (fun (resp, body) ->
-             match Cohttp.Response.status resp with
-             | `Created -> Lwt_result.return ()
-             | err ->
-               Log.warn (fun f -> f "@[<v2>%a failed: %s@,%s@]"
-                            pp (key, status)
-                            (Cohttp.Code.string_of_status err)
-                            body);
-               Lwt_result.fail (`Msg "Failed to set GitHub status")
-          )
-          (fun ex ->
-               Log.warn (fun f -> f "@[<v2>%a failed: %a@]"
-                            pp (key, status)
-                            Fmt.exn ex);
-               Lwt_result.fail (`Msg "Failed to set GitHub status")
-          )
+        let body = Yojson.Safe.to_string body in
+        (try
+           let resp, body = Http.post ~headers ~body uri in
+           match Cohttp.Response.status resp with
+           | `Created -> Ok ()
+           | err ->
+             Log.warn (fun f -> f "@[<v2>%a failed: %s@,%s@]"
+                          pp (key, status)
+                          (Cohttp.Code.string_of_status err)
+                          body);
+             Error (`Msg "Failed to set GitHub status")
+         with ex ->
+           Log.warn (fun f -> f "@[<v2>%a failed: %a@]"
+                        pp (key, status)
+                        Fmt.exn ex);
+           Error (`Msg "Failed to set GitHub status"))
   end
 
   module Set_status_cache = Current_cache.Output(Set_status)
@@ -1017,8 +1017,7 @@ module Anonymous = struct
 
   let query_head { Repo_id.owner; name } gref =
     let uri = ref_endpoint ~owner ~name gref in
-    Cohttp_lwt_unix.Client.get uri >>= fun (resp, body) ->
-    Cohttp_lwt.Body.to_string body >|= fun body ->
+    let resp, body = Http.get uri in
     match Cohttp.Response.status resp with
     | `OK | `Created ->
       let json = Yojson.Safe.from_string body in
@@ -1033,35 +1032,35 @@ module Anonymous = struct
   let head_of (repo : Repo_id.t) gref =
     let owner_name = Printf.sprintf "%s/%s" repo.owner repo.name in
     let read () =
-      Lwt.try_bind
-        (fun () -> query_head repo gref)
-        (fun hash ->
-          let id = { Commit_id.owner = repo.owner; repo = repo.name; hash; id = gref; committed_date = ""; message = "" } in
-          Lwt_result.return (Commit_id.to_git ~ssh:false id)
-        )
-        (fun ex ->
-           Log.warn (fun f -> f "GitHub query_head failed: %a" Fmt.exn ex);
-           Lwt_result.fail (`Msg (Fmt.str "Failed to get head of %a:%a" Repo_id.pp repo Ref.pp gref))
-        )
+      try
+        let hash = query_head repo gref in
+        let id = { Commit_id.owner = repo.owner; repo = repo.name; hash; id = gref; committed_date = ""; message = "" } in
+        Ok (Commit_id.to_git ~ssh:false id)
+      with ex ->
+        Log.warn (fun f -> f "GitHub query_head failed: %a" Fmt.exn ex);
+        Error (`Msg (Fmt.str "Failed to get head of %a:%a" Repo_id.pp repo Ref.pp gref))
     in
     let watch refresh =
-      let rec aux x =
-        x >>= fun () ->
-        let x = await_event ~owner_name in
-        refresh ();
-        Lwt_unix.sleep 10.0 >>= fun () ->   (* Limit updates to 1 per 10 seconds *)
-        aux x
-      in
-      let x = await_event ~owner_name in
-      let thread =
-        Lwt.catch
-          (fun () -> aux x)
-          (function
-            | Lwt.Canceled -> Lwt.return_unit
-            | ex -> Log.err (fun f -> f "Anonymous.head thread failed: %a" Fmt.exn ex); Lwt.return_unit
-          )
-      in
-      Lwt.return (fun () -> Lwt.cancel thread; Lwt.return_unit)
+      let stop = ref false in
+      Eio.Fiber.fork_daemon ~sw:(Current.Engine_env.get_sw ()) (fun () ->
+        let rec aux () =
+          if !stop then `Stop_daemon
+          else begin
+            (try
+               await_event ~owner_name;
+               refresh ();
+               Eio.Time.sleep (Current.Engine_env.clock ()) 10.0
+             with ex ->
+               Log.err (fun f -> f "Anonymous.head thread failed: %a" Fmt.exn ex));
+            aux ()
+          end
+        in
+        aux ()
+      );
+      fun () ->
+        stop := true;
+        let cond, _ = webhook_entry owner_name in
+        Eio.Condition.broadcast cond
     in
     let pp f = Fmt.pf f "Query head of %a:%a" Repo_id.pp repo Ref.pp gref in
     let monitor = Current.Monitor.create ~read ~watch ~pp in

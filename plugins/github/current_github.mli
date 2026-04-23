@@ -185,7 +185,7 @@ module Api : sig
   val of_oauth : token:string -> webhook_secret:string -> t
   (** [of_oauth ~token ~webhook_secret] is a configuration that authenticates to GitHub using [token]. *)
 
-  val exec_graphql : ?variables:(string * Yojson.Safe.t) list -> t -> string -> Yojson.Safe.t Lwt.t
+  val exec_graphql : ?variables:(string * Yojson.Safe.t) list -> t -> string -> Yojson.Safe.t
   (** [exec_graphql t query] executes [query] on GitHub. *)
 
   val head_commit : t -> Repo_id.t -> Commit.t Current.t

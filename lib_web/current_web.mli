@@ -86,6 +86,32 @@ module Context : sig
   (** [respond_error ctx code msg] returns an error message to the user, inside the site template. *)
 end
 
+(** Low-level helpers wrapping Cohttp_eio.Server with the tiny API lib_web
+    needs (respond_redirect / respond_not_found / respond_error). *)
+module Utils : sig
+  module Server : sig
+    include module type of Cohttp_eio.Server
+
+    val respond_redirect :
+      ?headers:Cohttp.Header.t ->
+      uri:Uri.t ->
+      unit ->
+      Cohttp_eio.Server.response
+
+    val respond_not_found : unit -> Cohttp_eio.Server.response
+
+    val respond_error :
+      ?status:Cohttp.Code.status_code ->
+      body:string ->
+      unit ->
+      Cohttp_eio.Server.response
+  end
+
+  val string_of_timestamp : Unix.tm -> string
+
+  val add_security_headers : Cohttp.Header.t -> Cohttp.Header.t
+end
+
 module Resource : sig
   (* A single HTTP resource in the web UI. *)
   class virtual t : object

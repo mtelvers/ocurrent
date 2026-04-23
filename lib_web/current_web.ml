@@ -2,6 +2,7 @@ module User = User
 module Role = Role
 module Site = Site
 module Context = Context
+module Utils = Utils
 
 let metrics ~engine = object
   inherit Resource.t

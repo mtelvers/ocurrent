@@ -1,5 +1,4 @@
 open Current.Syntax
-open Lwt.Infix
 
 module Metrics = struct
   open Prometheus
@@ -23,9 +22,11 @@ type t = {
   repos : (Api.Repo.t * repository_metadata) list Current.Monitor.t;
 }
 
-let installation_repositories_cond = Lwt_condition.create ()
+let installation_repositories_cond = Eio.Condition.create ()
+let installation_repositories_mutex = Eio.Mutex.create ()
 
-let input_installation_repositories_webhook () = Lwt_condition.broadcast installation_repositories_cond ()
+let input_installation_repositories_webhook () =
+  Eio.Condition.broadcast installation_repositories_cond
 
 let pp f t = Fmt.string f t.account
 
@@ -48,8 +49,7 @@ let list_repositories ~api ~token ~account =
   let headers = Cohttp.Header.add headers "accept" "application/vnd.github.machine-man-preview+json" in
   let rec aux uri =
     Log.debug (fun f -> f "Get repositories for %S from %a" account Uri.pp uri);
-    Cohttp_lwt_unix.Client.get ~headers uri >>= fun (resp, body) ->
-    Cohttp_lwt.Body.to_string body >>= fun body ->
+    let resp, body = Http.get ~headers uri in
     match Cohttp.Response.status resp with
     | `OK ->
       let json = Yojson.Safe.from_string body in
@@ -67,9 +67,9 @@ let list_repositories ~api ~token ~account =
           )
       in
       begin match next (Cohttp.Response.headers resp) with
-        | None -> Lwt.return repos
+        | None -> repos
         | Some target ->
-          aux target >|= fun next_repos ->
+          let next_repos = aux target in
           repos @ next_repos
       end
     | err -> Fmt.failwith "@[<v2>Error accessing GitHub installation API at %a: %s@,%s@]"
@@ -77,33 +77,39 @@ let list_repositories ~api ~token ~account =
                (Cohttp.Code.string_of_status err)
                body
   in
-  aux list_repositories_endpoint >|= fun repos ->
+  let repos = aux list_repositories_endpoint in
   Prometheus.Gauge.set (Metrics.repositories_total account) (float_of_int (List.length repos));
   repos
 
 let v ~iid ~account ~api =
   let read () =
-    Api.get_token api >>= function
+    match Api.get_token api with
     | Error (`Msg m) -> failwith m
     | Ok token ->
-      Lwt.try_bind
-        (fun () -> list_repositories ~api ~token ~account)
-        Lwt_result.return
-        (fun ex ->
-           Log.warn (fun f -> f "Error reading GitHub installations (will retry in 30s): %a" Fmt.exn ex);
-           Lwt_unix.sleep 30.0 >>= fun () ->
-           list_repositories ~api ~token ~account >|= Stdlib.Result.ok
-        )
+      try Ok (list_repositories ~api ~token ~account)
+      with ex ->
+        Log.warn (fun f -> f "Error reading GitHub installations (will retry in 30s): %a" Fmt.exn ex);
+        Eio.Time.sleep (Current.Engine_env.clock ()) 30.0;
+        Ok (list_repositories ~api ~token ~account)
   in
   let watch refresh =
-    let rec aux event =
-      event >>= fun () ->
-      let event = Lwt_condition.wait installation_repositories_cond in
-      refresh ();
-      aux event
-    in
-    let thread = aux (Lwt_condition.wait installation_repositories_cond) in
-    Lwt.return (fun () -> Lwt.cancel thread; Lwt.return_unit) in
+    let stop = ref false in
+    Eio.Fiber.fork_daemon ~sw:(Current.Engine_env.get_sw ()) (fun () ->
+      let rec aux () =
+        if !stop then `Stop_daemon
+        else begin
+          Eio.Mutex.use_rw ~protect:false installation_repositories_mutex (fun () ->
+            Eio.Condition.await installation_repositories_cond installation_repositories_mutex);
+          refresh ();
+          aux ()
+        end
+      in
+      aux ()
+    );
+    fun () ->
+      stop := true;
+      Eio.Condition.broadcast installation_repositories_cond
+  in
   let pp f = Fmt.string f account in
   let repos = Current.Monitor.create ~read ~watch ~pp in
   { iid; account; api; repos }

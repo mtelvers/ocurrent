@@ -1,5 +1,3 @@
-open Lwt.Infix
-
 module Repo_id = Repo_id
 module Api = Api
 module App = App
@@ -20,8 +18,11 @@ end
 
 let validate_webhook_payload webhook_secret body headers event =
   let request_signature = Option.value ~default:"<empty>" (Cohttp.Header.get headers "X-Hub-Signature-256") in
-  let signature = "sha256=" ^ Hex.show @@ Hex.of_cstruct @@
-    Mirage_crypto.Hash.SHA256.(hmac ~key:(Cstruct.of_string webhook_secret) (Cstruct.of_string body)) in
+  let mac =
+    Digestif.SHA256.hmac_string ~key:webhook_secret body
+    |> Digestif.SHA256.to_hex
+  in
+  let signature = "sha256=" ^ mac in
   if Eqaf.equal signature request_signature then
     Ok ()
   else
@@ -43,12 +44,12 @@ let webhook ~engine ~get_job_ids ~webhook_secret = object
     let event_str  = Option.value ~default:"NONE" event in
     Log.info (fun f -> f "Got GitHub event %S" event_str);
     Prometheus.Counter.inc_one (Metrics.webhook_events_total event_str);
-    Cohttp_lwt.Body.to_string body >>= fun body ->
+    let body = Eio.Buf_read.(of_flow ~max_size:max_int body |> take_all) in
     let json_body = Yojson.Safe.from_string body in
     match validate_webhook_payload webhook_secret body headers event_str with
     | Error msg ->
       Log.warn (fun f -> f "%s" msg);
-      Cohttp_lwt_unix.Server.respond_string ~status:`Unauthorized ~body:"Invalid X-Hub-Signature-256" ()
+      Current_web.Utils.Server.respond_string ~status:`Unauthorized ~body:"Invalid X-Hub-Signature-256" ()
     | Ok () ->
       let event_v = Webhook_event.validate event in
       begin match event_v with
@@ -62,5 +63,5 @@ let webhook ~engine ~get_job_ids ~webhook_secret = object
             in
             Api.rebuild_webhook ~engine ~event:c ~get_job_ids json_body
       end;
-      Cohttp_lwt_unix.Server.respond_string ~status:`OK ~body:"OK" ()
+      Current_web.Utils.Server.respond_string ~status:`OK ~body:"OK" ()
 end

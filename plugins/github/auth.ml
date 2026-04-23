@@ -1,7 +1,3 @@
-open Lwt.Infix
-
-module Server = Cohttp_lwt_unix.Server
-
 type t = {
   client_id : string;
   client_secret: string;
@@ -40,8 +36,7 @@ let make_login_uri t ~csrf =
 
 let get_access_token t ~state code =
   let headers = Cohttp.Header.init_with "Accept" "application/json" in
-  Cohttp_lwt_unix.Client.post ~headers (Endpoint.access_token t ~state code) >>= fun (resp, body) ->
-  Cohttp_lwt.Body.to_string body >|= fun body ->
+  let resp, body = Http.post ~headers (Endpoint.access_token t ~state code) in
   match Cohttp.Response.status resp with
   | `OK ->
     let json = Yojson.Safe.from_string body in
@@ -50,8 +45,7 @@ let get_access_token t ~state code =
 
 let get_user token =
   let headers = Cohttp.Header.init_with "Authorization" ("token " ^ token) in
-  Cohttp_lwt_unix.Client.get ~headers Endpoint.user >>= fun (resp, body) ->
-  Cohttp_lwt.Body.to_string body >|= fun body ->
+  let resp, body = Http.get ~headers Endpoint.user in
   match Cohttp.Response.status resp with
   | `OK ->
     let json = Yojson.Safe.from_string body in
@@ -78,39 +72,39 @@ let configuration_howto ctx =
 
 let login t : Current_web.Resource.t = object
   method get_raw site request =
-    Current_web.Context.of_request ~site request >>= fun ctx ->
+    let ctx = Current_web.Context.of_request ~site request in
     match t with
     | None -> configuration_howto ctx
     | Some t ->
       let uri = Cohttp.Request.uri request in
       match Uri.get_query_param uri "code", Uri.get_query_param uri "state" with
-      | None, _ -> Server.respond_error ~status:`Bad_request ~body:"Missing code" ()
-      | _, None -> Server.respond_error ~status:`Bad_request ~body:"Missing state" ()
+      | None, _ -> Current_web.Utils.Server.respond_error ~status:`Bad_request ~body:"Missing code" ()
+      | _, None -> Current_web.Utils.Server.respond_error ~status:`Bad_request ~body:"Missing state" ()
       | Some code, Some state ->
         if state <> Current_web.Context.csrf ctx then (
-          Server.respond_error ~status:`Bad_request ~body:"Bad CSRF token" ()
+          Current_web.Utils.Server.respond_error ~status:`Bad_request ~body:"Bad CSRF token" ()
         ) else (
-          get_access_token t ~state code >>= function
+          match get_access_token t ~state code with
           | Error (status, msg) ->
             Log.warn (fun f -> f "Failed to get OAuth token from GitHub: %s: %s" (Cohttp.Code.string_of_status status) msg);
-            Server.respond_error ~status:`Internal_server_error ~body:"Failed to get token" ()
+            Current_web.Utils.Server.respond_error ~status:`Internal_server_error ~body:"Failed to get token" ()
           | Ok token ->
-            get_user token >>= function
+            match get_user token with
             | Error (status, msg) ->
               Log.warn (fun f -> f "Failed to get user details from GitHub: %s: %s" (Cohttp.Code.string_of_status status) msg);
-              Server.respond_error ~status:`Internal_server_error ~body:"Failed to get user details" ()
+              Current_web.Utils.Server.respond_error ~status:`Internal_server_error ~body:"Failed to get user details" ()
             | Ok user ->
               Log.info (fun f -> f "Successful login for %S" user);
               match Current_web.User.v user with
               | Error (`Msg m) ->
                 Log.warn (fun f -> f "Failed to create user: %s" m);
-                Server.respond_error ~status:`Bad_request ~body:"Bad user" ()
+                Current_web.Utils.Server.respond_error ~status:`Bad_request ~body:"Bad user" ()
               | Ok user ->
                 Current_web.Context.set_user ctx user
         )
 
   method post_raw _ _ _ =
-    Server.respond_error ~status:`Bad_request ~body:"Bad method" ()
+    Current_web.Utils.Server.respond_error ~status:`Bad_request ~body:"Bad method" ()
 
   method nav_link = None
 end
