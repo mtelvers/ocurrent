@@ -150,7 +150,7 @@ module Engine = struct
     if Current_incr.observe Config.now <> None then
       failwith "Engine is already running (Config.now already set)!";
     Current_incr.change Config.active_config (Some config);
-    Eio.Fiber.fork ~sw:(Engine_env.get_sw ()) (fun () ->
+    Eio.Fiber.fork_daemon ~sw:(Engine_env.get_sw ()) (fun () ->
       Fun.protect
         ~finally:(fun () -> Current_incr.change Config.active_config None)
         (fun () ->
@@ -276,10 +276,10 @@ module Monitor = struct
         );
       if not t.active then (
         t.active <- true;
-        Eio.Fiber.fork ~sw:(Engine_env.get_sw ()) (fun () ->
+        Eio.Fiber.fork_daemon ~sw:(Engine_env.get_sw ()) (fun () ->
             Eio.Fiber.yield ();
             let `Finished = enable t in
-            ()
+            `Stop_daemon
           )
       );
       Current_incr.read (Current_incr.of_var t.value) @@ fun value ->
