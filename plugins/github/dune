@@ -3,33 +3,24 @@
  (libraries
   astring
   base64
-  ca-certs
   cmdliner
   cohttp
-  cohttp-eio
-  cstruct
   current
   current.cache
+  current.http
   current_term
   current_git
   current_web
   digestif
-  domain-name
   duration
   eio
-  eio.unix
-  github-unix
-  lwt_eio
   ptime
   fmt
   logs
-  mirage-crypto
   mirage-crypto-pk
   prometheus
   result
   rresult
-  tls
-  tls-eio
   uri
   x509
   tyxml

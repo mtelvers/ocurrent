@@ -446,7 +446,7 @@ let exec_graphql ?variables t query =
   | Error (`Msg m) -> failwith m
   | Ok token ->
     let headers = Cohttp.Header.init_with "Authorization" ("bearer " ^ token) in
-    let resp, body = Http.post ~headers ~body graphql_endpoint in
+    let resp, body = Current_http.post ~headers ~body graphql_endpoint in
     match Cohttp.Response.status resp with
     | `OK ->
       let json = Yojson.Safe.from_string body in
@@ -816,48 +816,85 @@ module CheckRun = struct
       match get_token t with
       | Error (`Msg m) -> failwith m
       | Ok token ->
-         let token = Github.Token.of_string token in
          let owner = key.Key.commit.owner in
          let repo = key.Key.commit.repo in
          let sha = key.Key.commit.hash in
          let app_id = t.app_id in
          let check_name = key.Key.check_name in
-
+         let headers =
+           Cohttp.Header.of_list [
+             "Authorization", "bearer " ^ token;
+             "Accept", "application/vnd.github+json";
+           ]
+         in
+         let check_run_base =
+           Fmt.str "https://api.github.com/repos/%s/%s/check-runs" owner repo
+         in
+         (* GET /repos/:owner/:repo/commits/:sha/check-runs?check_name=...&app_id=...
+            Assuming a single check_run per app/sha/check_name, return the first. *)
+         let fetch_check_run_id () =
+           let query =
+             ("check_name", [check_name]) ::
+             (match app_id with
+              | None -> []
+              | Some id -> ["app_id", [id]])
+           in
+           let uri =
+             Uri.with_query
+               (Uri.of_string
+                  (Fmt.str "https://api.github.com/repos/%s/%s/commits/%s/check-runs"
+                     owner repo sha))
+               query
+           in
+           let resp, body = Current_http.get ~headers uri in
+           match Cohttp.Response.status resp with
+           | `OK ->
+             let json = Yojson.Safe.from_string body in
+             begin match Yojson.Safe.Util.(json |> member "check_runs" |> to_list) with
+             | [] -> None
+             | first :: _ ->
+               let id =
+                 match Yojson.Safe.Util.member "id" first with
+                 | `Int i -> string_of_int i
+                 | `Intlit s -> s
+                 | _ -> Fmt.failwith "check-runs response: id not an integer"
+               in
+               Some id
+             end
+           | err ->
+             Fmt.failwith "list_check_runs_for_ref: %s@,%s"
+               (Cohttp.Code.string_of_status err) body
+         in
          let create_check () =
-           let open Github in
-           let body = `Assoc (("name", `String check_name)
-                              :: ("head_sha", `String key.Key.commit.hash)
-                              :: Value.json_items status) |> Yojson.Safe.to_string in
+           let body =
+             `Assoc (("name", `String check_name)
+                     :: ("head_sha", `String sha)
+                     :: Value.json_items status)
+             |> Yojson.Safe.to_string
+           in
            Log.debug (fun f -> f "create_check: %s" body);
-           Check.create_check_run ~token ~owner ~repo ~body () in
-
-         let fetch_check_run () =
-           let open Github in
-           let open Monad in
-           (* Assuming a single check_run per app/sha/check_name hence the `List.nth_opt`. *)
-           Check.list_check_runs_for_ref ~token ~owner ~repo ~sha ?app_id ~check_name () >>~
-           fun l -> return @@ List.nth_opt l.check_runs 0 in
-
-         let update_check_run check_run () =
-           let open Github in
-           let check_run_id = Int64.to_string check_run.Github_j.check_run_id in
+           let resp, resp_body = Current_http.post ~headers ~body (Uri.of_string check_run_base) in
+           match Cohttp.Response.status resp with
+           | `Created -> ()
+           | err ->
+             Fmt.failwith "create_check_run: %s@,%s"
+               (Cohttp.Code.string_of_status err) resp_body
+         in
+         let update_check_run check_run_id =
            let body = `Assoc (Value.json_items status) |> Yojson.Safe.to_string in
            Log.debug (fun f -> f "update_check: %s" body);
-           Check.update_check_run ~token ~owner ~repo ~check_run_id ~body () in
-
-         (* The github-unix library is Lwt-based; use Lwt_eio.run_lwt to
-            bridge. Requires Lwt_eio.with_event_loop to be set up by the
-            application's main. *)
+           let uri = Uri.of_string (check_run_base ^ "/" ^ check_run_id) in
+           let resp, resp_body = Current_http.patch ~headers ~body uri in
+           match Cohttp.Response.status resp with
+           | `OK -> ()
+           | err ->
+             Fmt.failwith "update_check_run: %s@,%s"
+               (Cohttp.Code.string_of_status err) resp_body
+         in
          (try
-            let _ : _ Github.Response.t =
-              Lwt_eio.run_lwt (fun () ->
-                let open Github in
-                let open Monad in
-                run (
-                  fetch_check_run () >>= function
-                  | None -> create_check ()
-                  | Some check_run -> update_check_run check_run ()))
-            in
+            (match fetch_check_run_id () with
+             | None -> create_check ()
+             | Some id -> update_check_run id);
             Ok ()
           with ex ->
             Log.info (fun f -> f "@[<v2>%a failed: %a@]"
@@ -929,7 +966,7 @@ module Commit = struct
           (Yojson.Safe.pretty_print ~std:true) body;
         let body = Yojson.Safe.to_string body in
         (try
-           let resp, body = Http.post ~headers ~body uri in
+           let resp, body = Current_http.post ~headers ~body uri in
            match Cohttp.Response.status resp with
            | `Created -> Ok ()
            | err ->
@@ -1017,7 +1054,7 @@ module Anonymous = struct
 
   let query_head { Repo_id.owner; name } gref =
     let uri = ref_endpoint ~owner ~name gref in
-    let resp, body = Http.get uri in
+    let resp, body = Current_http.get uri in
     match Cohttp.Response.status resp with
     | `OK | `Created ->
       let json = Yojson.Safe.from_string body in
