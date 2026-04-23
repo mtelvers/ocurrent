@@ -78,8 +78,8 @@ val get_token : t -> (string, [`Msg of string]) result
 (** [get_token t] returns the cached token for [t], or fetches a new one if it has expired. *)
 
 type webhooks_accepted = [
-  | `MergeRequest of Gitlab_t.merge_request_webhook
-  | `Push of Gitlab_t.push_webhook
+  | `MergeRequest of Gitlab_types_t.merge_request_webhook
+  | `Push of Gitlab_types_t.push_webhook
   ]
 
 val input_webhook : webhooks_accepted -> unit

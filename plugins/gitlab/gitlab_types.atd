@@ -1,0 +1,85 @@
+(* Minimal ATD definitions covering only the GitLab v4 API / webhook fields
+   OCurrent actually reads. Unknown JSON fields are ignored by default,
+   so narrowing this down is safe. Derived from the upstream ocaml-gitlab
+   0.1.8 schema. *)
+
+type commit_status_status = [
+    Pending   <json name="pending">
+  | Running   <json name="running">
+  | Success   <json name="success">
+  | Failed    <json name="failed">
+  | Cancelled <json name="cancelled">
+]
+
+type new_status = {
+  state : commit_status_status;
+  ?ref_name : string option;
+  ?name : string option;
+  ?target_url : string option;
+  ?description : string option;
+  ?coverage : int option;
+  ?pipeline_id : int option;
+}
+
+(* The response from POSTing a new status. We parse it (to confirm the
+   server returned JSON) but never inspect individual fields. *)
+type commit_status = {
+  id <ocaml name="commit_status_id"> : int;
+}
+
+type commit = {
+  id               <ocaml name="commit_id"> : string;
+  message          <ocaml name="commit_message"> : string;
+  created_at       <ocaml name="commit_created_at"> : string;
+  committed_date   <ocaml name="commit_committed_date"> : string;
+}
+
+type commits = commit list
+
+type branch_full = {
+  name    <ocaml name="branch_full_name"> : string;
+  default <ocaml name="branch_full_default"> : bool;
+  commit  <ocaml name="branch_full_commit"> : commit;
+}
+
+type branches_full = branch_full list
+
+type merge_request = {
+  iid           <ocaml name="merge_request_iid"> : int;
+  title         <ocaml name="merge_request_title"> : string;
+  description   <ocaml name="merge_request_description"> : string;
+  source_branch <ocaml name="merge_request_source_branch"> : string;
+  updated_at    <ocaml name="merge_request_updated_at"> : string;
+  ?sha          <ocaml name="merge_request_sha"> : string option;
+}
+
+type merge_requests = merge_request list
+
+type project_short = {
+  id             <ocaml name="project_short_id"> : int;
+  default_branch <ocaml name="project_short_default_branch"> : string;
+}
+
+type current_user = {
+  username <ocaml name="current_user_username"> : string;
+}
+
+(* Webhook payloads. GitLab sends e.g. {"object_kind": "push", ...} — we
+   reroute that through an adapter to a tagged polymorphic variant. *)
+
+type project_webhook = {
+  path_with_namespace <ocaml name="project_webhook_path_with_namespace"> : string;
+}
+
+type push_webhook = {
+  project <ocaml name="push_webhook_project"> : project_webhook;
+}
+
+type merge_request_webhook = {
+  project <ocaml name="merge_request_webhook_project"> : project_webhook;
+}
+
+type webhook = [
+    Push          <json name="push">          of push_webhook
+  | MergeRequest  <json name="merge_request"> of merge_request_webhook
+] <json adapter.ocaml="Gitlab_adapter.Webhook_event">

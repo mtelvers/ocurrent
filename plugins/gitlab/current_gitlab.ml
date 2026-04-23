@@ -45,10 +45,9 @@ let webhook ~webhook_secret = object
       | Ok () ->
          begin match event with
          | Some "Merge Request Hook" | Some "Push Hook" ->
-           begin match Gitlab_j.webhook_of_string body with
+           begin match Gitlab_types_j.webhook_of_string body with
             | `MergeRequest _ as x -> Api.input_webhook x
             | `Push _ as x -> Api.input_webhook x
-            | x -> Log.warn (fun f -> f "Unknown GitLab event type %S" (Gitlab_j.string_of_webhook x))
            end
          | Some x -> Log.warn (fun f -> f "Unknown GitLab event type %S" x)
          | None -> Log.warn (fun f -> f "Missing GitLab event type in webhook!")

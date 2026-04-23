@@ -63,8 +63,8 @@ let get_user token =
   let resp, body = Current_http.get ~headers uri in
   match Cohttp.Response.status resp with
   | `OK ->
-    let user = Gitlab_j.current_user_of_string body in
-    Ok ("gitlab:" ^ user.Gitlab_t.current_user_username)
+    let user = Gitlab_types_j.current_user_of_string body in
+    Ok ("gitlab:" ^ user.Gitlab_types_t.current_user_username)
   | status -> Error (status, body)
 
 let example_config () =

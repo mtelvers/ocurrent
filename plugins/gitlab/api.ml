@@ -18,8 +18,8 @@ let webhook_entry owner_name =
 exception Project_not_found of int
 
 type webhooks_accepted =
-  [ `MergeRequest of Gitlab_t.merge_request_webhook
-  | `Push of Gitlab_t.push_webhook
+  [ `MergeRequest of Gitlab_types_t.merge_request_webhook
+  | `Push of Gitlab_types_t.push_webhook
   ]
 
 let input_webhook (body : webhooks_accepted) =
@@ -245,22 +245,22 @@ module Gl = struct
     let uri = Uri.of_string (api_base ^ path) in
     Current_http.get ~headers:(auth_headers ?token ()) uri
 
-  let project_by_id ?token project_id () : Gitlab_t.project_short option =
+  let project_by_id ?token project_id () : Gitlab_types_t.project_short option =
     let resp, body = get ?token (Printf.sprintf "/projects/%d" project_id) in
     match Cohttp.Response.status resp with
-    | `OK -> Some (Gitlab_j.project_short_of_string body)
+    | `OK -> Some (Gitlab_types_j.project_short_of_string body)
     | `Not_found -> None
     | err -> Fmt.failwith "GitLab project_by_id %d: %s" project_id
                (Cohttp.Code.string_of_status err)
 
-  let branch ?token ~project_id ~branch_name () : Gitlab_t.branch_full =
+  let branch ?token ~project_id ~branch_name () : Gitlab_types_t.branch_full =
     let resp, body =
       get ?token (Printf.sprintf "/projects/%d/repository/branches/%s"
                     project_id
                     (Uri.pct_encode ~component:`Path branch_name))
     in
     match Cohttp.Response.status resp with
-    | `OK -> Gitlab_j.branch_full_of_string body
+    | `OK -> Gitlab_types_j.branch_full_of_string body
     | err -> Fmt.failwith "GitLab branch lookup: %s" (Cohttp.Code.string_of_status err)
 
   (* Simple paginator: GitLab uses page/per_page query params; follow the
@@ -292,21 +292,21 @@ module Gl = struct
     in
     loop uri []
 
-  let branches ?token ~project_id () : Gitlab_t.branch_full list =
+  let branches ?token ~project_id () : Gitlab_types_t.branch_full list =
     paginate ?token
-      ~parse:Gitlab_j.branches_full_of_string
+      ~parse:Gitlab_types_j.branches_full_of_string
       (Printf.sprintf "/projects/%d/repository/branches" project_id)
 
-  let merge_requests_opened ?token ~project_id () : Gitlab_t.merge_request list =
+  let merge_requests_opened ?token ~project_id () : Gitlab_types_t.merge_request list =
     let path = Printf.sprintf "/projects/%d/merge_requests?state=opened" project_id in
-    paginate ?token ~parse:Gitlab_j.merge_requests_of_string path
+    paginate ?token ~parse:Gitlab_types_j.merge_requests_of_string path
 
-  let merge_request ?token ~project_id ~iid () : Gitlab_t.merge_request =
+  let merge_request ?token ~project_id ~iid () : Gitlab_types_t.merge_request =
     let resp, body =
       get ?token (Printf.sprintf "/projects/%d/merge_requests/%s" project_id iid)
     in
     match Cohttp.Response.status resp with
-    | `OK -> Gitlab_j.merge_request_of_string body
+    | `OK -> Gitlab_types_j.merge_request_of_string body
     | err -> Fmt.failwith "GitLab merge_request: %s" (Cohttp.Code.string_of_status err)
 
   let latest_commit_on_ref ?token ~project_id ~ref_name () : string =
@@ -317,13 +317,13 @@ module Gl = struct
     in
     match Cohttp.Response.status resp with
     | `OK ->
-      (match Gitlab_j.commits_of_string body with
+      (match Gitlab_types_j.commits_of_string body with
        | c :: _ -> c.commit_id
        | [] -> Fmt.failwith "GitLab: no commits found for ref %S" ref_name)
     | err -> Fmt.failwith "GitLab latest_commit_on_ref: %s" (Cohttp.Code.string_of_status err)
 
-  let set_commit_status ~token ~project_id ~sha (status : Gitlab_t.new_status) =
-    let body = Gitlab_j.string_of_new_status status in
+  let set_commit_status ~token ~project_id ~sha (status : Gitlab_types_t.new_status) =
+    let body = Gitlab_types_j.string_of_new_status status in
     let headers = auth_headers ~token () in
     let headers = Cohttp.Header.add headers "Content-Type" "application/json" in
     let uri =
@@ -332,7 +332,7 @@ module Gl = struct
     in
     let resp, body = Current_http.post ~headers ~body uri in
     match Cohttp.Response.status resp with
-    | `OK | `Created -> Gitlab_j.commit_status_of_string body
+    | `OK | `Created -> Gitlab_types_j.commit_status_of_string body
     | err ->
       Fmt.failwith "GitLab set_commit_status: %s@,%s"
         (Cohttp.Code.string_of_status err) body
@@ -346,11 +346,11 @@ let get_default_ref _t (repo_id : Repo_id.t) =
   | Some project ->
     let branch_name = project.project_short_default_branch in
     let b = Gl.branch ~project_id:project.project_short_id ~branch_name () in
-    let c = b.Gitlab_t.branch_full_commit in
+    let c = b.Gitlab_types_t.branch_full_commit in
     { Commit_id.repo = repo_id
     ; id = `Ref (prefix ^ branch_name)
     ; hash = c.commit_id
-    ; committed_date = Gitlab_json.DateTime.unwrap c.commit_created_at
+    ; committed_date = c.commit_created_at
     ; message = c.commit_message }
 
 let make_head_commit_monitor t repo =
@@ -446,7 +446,7 @@ module Commit = struct
         (try
            let sha = commit.Commit_id.hash in
            let project_id = commit.repo.project_id in
-           let new_status : Gitlab_t.new_status =
+           let new_status : Gitlab_types_t.new_status =
              { state = state_to_gitlab status.Status.state
              ; name = Some context
              ; target_url = Option.map Uri.to_string status.Status.url
@@ -501,26 +501,26 @@ end
 let exec_query token project_id =
   let merge_requests = Gl.merge_requests_opened ~token ~project_id () in
   let branches = Gl.branches ~token ~project_id () in
-  let default_branch = List.find (fun br -> br.Gitlab_t.branch_full_default) branches in
+  let default_branch = List.find (fun br -> br.Gitlab_types_t.branch_full_default) branches in
   (default_branch, branches, merge_requests)
 
-let parse_ref ~repo ~prefix (branch : Gitlab_t.branch_full) : Commit_id.t =
+let parse_ref ~repo ~prefix (branch : Gitlab_types_t.branch_full) : Commit_id.t =
   let hash = branch.branch_full_commit.commit_id in
   let committed_date = branch.branch_full_commit.commit_committed_date in
   let name = branch.branch_full_name in
   { Commit_id.repo; id = `Ref (prefix ^ name); hash;
-    committed_date = Gitlab_json.DateTime.unwrap committed_date;
+    committed_date;
     message = branch.branch_full_commit.commit_message }
 
-let parse_merge_request ~repo ?(branches : Gitlab_t.branch_full list = [])
-                        (mr : Gitlab_t.merge_request) : Commit_id.t =
+let parse_merge_request ~repo ?(branches : Gitlab_types_t.branch_full list = [])
+                        (mr : Gitlab_types_t.merge_request) : Commit_id.t =
   let hash = Option.get mr.merge_request_sha in
   let mr' = Ref.{ id = mr.merge_request_iid; title = mr.merge_request_title;
              base = mr.merge_request_source_branch ; body = mr.merge_request_description  }
   in
   let committed_date = mr.merge_request_updated_at in
   let message =
-      let f (br : Gitlab_t.branch_full) =
+      let f (br : Gitlab_types_t.branch_full) =
           String.equal hash br.branch_full_commit.commit_id
       in
       match List.find_opt f branches with
@@ -532,7 +532,7 @@ let parse_merge_request ~repo ?(branches : Gitlab_t.branch_full list = [])
   *)
   (* TODO: Recover if the merge request does not have a SHA *)
   { Commit_id.repo; id = `MR mr'; hash;
-    committed_date = Gitlab_json.DateTime.unwrap committed_date ; message }
+    committed_date ; message }
 
 let get_refs t (repo : Repo_id.t) =
   match get_token t with
@@ -542,7 +542,7 @@ let get_refs t (repo : Repo_id.t) =
     let prefix = "refs/heads/" in
     let refs = List.map (parse_ref ~repo ~prefix) branches in
     let prs = List.map (parse_merge_request ~repo ~branches) prs in
-    let default_ref = `Ref (prefix ^ default_branch.Gitlab_t.branch_full_name) in
+    let default_ref = `Ref (prefix ^ default_branch.Gitlab_types_t.branch_full_name) in
 
     (* Record metrics for monitoring. *)
     let n_branches = List.length branches in
@@ -678,7 +678,7 @@ module Anonymous = struct
     | `MR mr_no ->
       let mr = Gl.merge_request ~project_id ~iid:(string_of_int mr_no.id) () in
       (* TODO: Recover if the merge request does not have a SHA *)
-      Option.get mr.Gitlab_t.merge_request_sha
+      Option.get mr.Gitlab_types_t.merge_request_sha
 
   let head_of (repo : Repo_id.t) (gref : Ref.t)=
     let owner_name = Fmt.str "%a" Repo_id.to_git repo in

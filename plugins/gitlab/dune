@@ -1,6 +1,7 @@
 (library
  (public_name current_gitlab)
  (libraries
+  atdgen-runtime
   cmdliner
   cohttp
   current
@@ -10,7 +11,6 @@
   current_git
   current_web
   eio
-  gitlab
   fmt
   logs
   ptime
@@ -21,3 +21,13 @@
   yojson)
  (preprocess
   (pps ppx_deriving_yojson)))
+
+(rule
+ (targets gitlab_types_t.ml gitlab_types_t.mli)
+ (deps gitlab_types.atd)
+ (action (run atdgen -t %{deps})))
+
+(rule
+ (targets gitlab_types_j.ml gitlab_types_j.mli)
+ (deps gitlab_types.atd)
+ (action (run atdgen -j -j-std %{deps})))
