@@ -2,20 +2,22 @@
  (public_name current_gitlab)
  (libraries
   cmdliner
+  cohttp
   current
   current.cache
+  current.http
   current_term
   current_git
   current_web
-  gitlab-unix
+  eio
+  gitlab
   fmt
   logs
-  lwt
-  lwt.unix
   ptime
   prometheus
   result
   rresult
+  uri
   yojson)
  (preprocess
   (pps ppx_deriving_yojson)))

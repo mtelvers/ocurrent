@@ -74,7 +74,7 @@ type token = {
       If [None], [token] does not expire. *)
 }
 
-val get_token : t -> (string, [`Msg of string]) result Lwt.t
+val get_token : t -> (string, [`Msg of string]) result
 (** [get_token t] returns the cached token for [t], or fetches a new one if it has expired. *)
 
 type webhooks_accepted = [
@@ -85,5 +85,5 @@ type webhooks_accepted = [
 val input_webhook : webhooks_accepted -> unit
 (** [input_webhook] is called when a [webhook_accepted] request is made. *)
 
-val v : get_token:(unit -> token Lwt.t) -> webhook_secret:string -> unit -> t
+val v : get_token:(unit -> token) -> webhook_secret:string -> unit -> t
 

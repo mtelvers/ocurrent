@@ -1,5 +1,3 @@
-open Lwt.Infix
-
 module Repo_id = Repo_id
 module Api = Api
 module Auth = Auth
@@ -39,11 +37,11 @@ let webhook ~webhook_secret = object
       let event_str = Option.value ~default:"NONE" event in
       Log.info (fun f -> f "Got GitLab event %a" Fmt.(option ~none:(any "NONE") (quote string)) event);
       Prometheus.Counter.inc_one (Metrics.webhook_events_total event_str);
-      Cohttp_lwt.Body.to_string body >>= fun body ->
+      let body = Eio.Buf_read.(of_flow ~max_size:max_int body |> take_all) in
       match validate_webhook webhook_secret headers event_str with
       | Error msg ->
          Log.warn (fun f -> f "%s" msg);
-         Cohttp_lwt_unix.Server.respond_string ~status:`Unauthorized ~body:"Invalid X-Gitlab-Token" ()
+         Current_web.Utils.Server.respond_string ~status:`Unauthorized ~body:"Invalid X-Gitlab-Token" ()
       | Ok () ->
          begin match event with
          | Some "Merge Request Hook" | Some "Push Hook" ->
@@ -55,5 +53,5 @@ let webhook ~webhook_secret = object
          | Some x -> Log.warn (fun f -> f "Unknown GitLab event type %S" x)
          | None -> Log.warn (fun f -> f "Missing GitLab event type in webhook!")
          end;
-         Cohttp_lwt_unix.Server.respond_string ~status:`OK ~body:"OK" ()
+         Current_web.Utils.Server.respond_string ~status:`OK ~body:"OK" ()
   end

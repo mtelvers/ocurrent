@@ -1,11 +1,19 @@
-open Lwt.Infix
 open Current.Syntax
 
 (* Limit updates to one at a time for now. *)
 let pool = Current.Pool.create ~label:"gitlab" 1
 
-(* When we get a webhook event, we fire the condition for that repository `owner/name`, if any. *)
-let webhook_cond = Hashtbl.create 10
+(* When we get a webhook event, we fire the condition for that repository `owner/name`, if any.
+   The pair is (condition, mutex) — Eio conditions need a mutex for [await]. *)
+let webhook_cond : (string, Eio.Condition.t * Eio.Mutex.t) Hashtbl.t = Hashtbl.create 10
+
+let webhook_entry owner_name =
+  match Hashtbl.find_opt webhook_cond owner_name with
+  | Some c -> c
+  | None ->
+    let c = Eio.Condition.create (), Eio.Mutex.create () in
+    Hashtbl.add webhook_cond owner_name c;
+    c
 
 exception Project_not_found of int
 
@@ -16,7 +24,7 @@ type webhooks_accepted =
 
 let input_webhook (body : webhooks_accepted) =
   let update owner_name = match Hashtbl.find_opt webhook_cond owner_name with
-      | Some cond -> Lwt_condition.broadcast cond ()
+      | Some (cond, _mutex) -> Eio.Condition.broadcast cond
       | None -> Log.info (fun f -> f "Got webhook event for %S, but we're not interested in that" owner_name)
   in
   match body with
@@ -169,9 +177,9 @@ module Commit_id = struct
 end
 
 type t = {
-  get_token : unit -> token Lwt.t;
+  get_token : unit -> token;
   webhook_secret : string;  (* Shared secret for validating webhooks from GitLab *)
-  token_lock : Lwt_mutex.t;
+  token_lock : Eio.Mutex.t;
   mutable token : token;
   mutable head_monitors : commit Current.Monitor.t Repo_map.t;
   mutable refs_monitors : refs Current.Monitor.t Repo_map.t;
@@ -191,89 +199,187 @@ let all_refs t = t.all_refs
 let v ~get_token ~webhook_secret () =
   let head_monitors = Repo_map.empty in
   let refs_monitors = Repo_map.empty in
-  let token_lock = Lwt_mutex.create () in
+  let token_lock = Eio.Mutex.create () in
   { get_token; token_lock; token = no_token; head_monitors; refs_monitors; webhook_secret }
 
 let of_oauth ~token ~webhook_secret =
-  let get_token () = Lwt.return { token = Ok token; expiry = None} in
+  let get_token () = { token = Ok token; expiry = None} in
   v ~get_token ~webhook_secret ()
 
 let get_token t =
-  Lwt_mutex.with_lock t.token_lock @@ fun () ->
+  Eio.Mutex.use_rw ~protect:false t.token_lock @@ fun () ->
   let now = Unix.gettimeofday () in
   match t.token with
-  | { token; expiry = None } -> Lwt.return token
-  | { token; expiry = Some expiry } when now < expiry -> Lwt.return token
+  | { token; expiry = None } -> token
+  | { token; expiry = Some expiry } when now < expiry -> token
   | _ ->
     Log.info (fun f -> f "Getting API token");
-    Lwt.catch t.get_token
-      (fun ex ->
-         Log.warn (fun f -> f "Error getting GitLab token: %a" Fmt.exn ex);
-         let token = Error (`Msg "Failed to get GitLab token") in
-         let expiry = Some (now +. 60.0) in
-         Lwt.return {token; expiry}
-      )
-    >|= fun token ->
+    let token =
+      try t.get_token ()
+      with ex ->
+        Log.warn (fun f -> f "Error getting GitLab token: %a" Fmt.exn ex);
+        let token = Error (`Msg "Failed to get GitLab token") in
+        let expiry = Some (now +. 60.0) in
+        {token; expiry}
+    in
     t.token <- token;
     token.token
 
 let await_event ~owner_name =
-  let cond =
-    match Hashtbl.find_opt webhook_cond owner_name with
-    | Some c -> c
-    | None ->
-      let c = Lwt_condition.create () in
-      Hashtbl.add webhook_cond owner_name c;
-      c
-  in
-  Lwt_condition.wait cond
+  let cond, mutex = webhook_entry owner_name in
+  Eio.Mutex.use_rw ~protect:false mutex (fun () ->
+    Eio.Condition.await cond mutex)
 
-let get_commit project_id =
-  let open Gitlab in
-  let open Monad in
-  Project.by_id ~project_id () >>~ function
-  | None ->
-    fail (Project_not_found project_id)
-  | Some (project : Gitlab_t.project_short) ->
-    Project.Branch.branch ~project_id:project.project_short_id ~branch:project.project_short_default_branch () >|~ fun x ->
-    (x.Gitlab_t.branch_full_commit, project.project_short_default_branch)
+(* GitLab API v4 client. Replaces the Lwt-based [Gitlab] library's
+   monadic API with direct HTTPS calls via [Current_http]. *)
+module Gl = struct
+  let api_base = "https://gitlab.com/api/v4"
 
-(* Get latest Git ref for the default branch in GitLab? *)
+  let auth_headers ?token () =
+    let h = Cohttp.Header.init_with "Accept" "application/json" in
+    match token with
+    | None -> h
+    | Some t -> Cohttp.Header.add h "Authorization" ("Bearer " ^ t)
+
+  let get ?token path =
+    let uri = Uri.of_string (api_base ^ path) in
+    Current_http.get ~headers:(auth_headers ?token ()) uri
+
+  let project_by_id ?token project_id () : Gitlab_t.project_short option =
+    let resp, body = get ?token (Printf.sprintf "/projects/%d" project_id) in
+    match Cohttp.Response.status resp with
+    | `OK -> Some (Gitlab_j.project_short_of_string body)
+    | `Not_found -> None
+    | err -> Fmt.failwith "GitLab project_by_id %d: %s" project_id
+               (Cohttp.Code.string_of_status err)
+
+  let branch ?token ~project_id ~branch_name () : Gitlab_t.branch_full =
+    let resp, body =
+      get ?token (Printf.sprintf "/projects/%d/repository/branches/%s"
+                    project_id
+                    (Uri.pct_encode ~component:`Path branch_name))
+    in
+    match Cohttp.Response.status resp with
+    | `OK -> Gitlab_j.branch_full_of_string body
+    | err -> Fmt.failwith "GitLab branch lookup: %s" (Cohttp.Code.string_of_status err)
+
+  (* Simple paginator: GitLab uses page/per_page query params; follow the
+     Link: next header until exhausted. *)
+  let paginate ?token ~parse path =
+    let rec loop uri acc =
+      let resp, body =
+        Current_http.get ~headers:(auth_headers ?token ()) uri
+      in
+      match Cohttp.Response.status resp with
+      | `OK ->
+        let page = parse body in
+        let acc = acc @ page in
+        let next =
+          Cohttp.Response.headers resp
+          |> Cohttp.Header.get_links
+          |> List.find_opt (fun (l : Cohttp.Link.t) ->
+              List.exists (fun r -> r = Cohttp.Link.Rel.next) l.arc.relation)
+          |> Option.map (fun l -> l.Cohttp.Link.target)
+        in
+        (match next with
+         | None -> acc
+         | Some next -> loop next acc)
+      | err -> Fmt.failwith "GitLab %s: %s" path (Cohttp.Code.string_of_status err)
+    in
+    let uri =
+      Uri.of_string (api_base ^ path)
+      |> fun u -> Uri.add_query_param u ("per_page", ["100"])
+    in
+    loop uri []
+
+  let branches ?token ~project_id () : Gitlab_t.branch_full list =
+    paginate ?token
+      ~parse:Gitlab_j.branches_full_of_string
+      (Printf.sprintf "/projects/%d/repository/branches" project_id)
+
+  let merge_requests_opened ?token ~project_id () : Gitlab_t.merge_request list =
+    let path = Printf.sprintf "/projects/%d/merge_requests?state=opened" project_id in
+    paginate ?token ~parse:Gitlab_j.merge_requests_of_string path
+
+  let merge_request ?token ~project_id ~iid () : Gitlab_t.merge_request =
+    let resp, body =
+      get ?token (Printf.sprintf "/projects/%d/merge_requests/%s" project_id iid)
+    in
+    match Cohttp.Response.status resp with
+    | `OK -> Gitlab_j.merge_request_of_string body
+    | err -> Fmt.failwith "GitLab merge_request: %s" (Cohttp.Code.string_of_status err)
+
+  let latest_commit_on_ref ?token ~project_id ~ref_name () : string =
+    let resp, body =
+      get ?token
+        (Printf.sprintf "/projects/%d/repository/commits?ref_name=%s&per_page=1"
+           project_id (Uri.pct_encode ~component:`Query_value ref_name))
+    in
+    match Cohttp.Response.status resp with
+    | `OK ->
+      (match Gitlab_j.commits_of_string body with
+       | c :: _ -> c.commit_id
+       | [] -> Fmt.failwith "GitLab: no commits found for ref %S" ref_name)
+    | err -> Fmt.failwith "GitLab latest_commit_on_ref: %s" (Cohttp.Code.string_of_status err)
+
+  let set_commit_status ~token ~project_id ~sha (status : Gitlab_t.new_status) =
+    let body = Gitlab_j.string_of_new_status status in
+    let headers = auth_headers ~token () in
+    let headers = Cohttp.Header.add headers "Content-Type" "application/json" in
+    let uri =
+      Uri.of_string
+        (Printf.sprintf "%s/projects/%d/statuses/%s" api_base project_id sha)
+    in
+    let resp, body = Current_http.post ~headers ~body uri in
+    match Cohttp.Response.status resp with
+    | `OK | `Created -> Gitlab_j.commit_status_of_string body
+    | err ->
+      Fmt.failwith "GitLab set_commit_status: %s@,%s"
+        (Cohttp.Code.string_of_status err) body
+end
+
+(* Get latest Git ref for the default branch in GitLab. *)
 let get_default_ref _t (repo_id : Repo_id.t) =
   let prefix = "refs/heads/" in
-  Gitlab.Monad.run (get_commit repo_id.project_id) >>= fun (c, branch_name) ->
-  (* Get the first commit, which should be the latest one on that branch. ie the default branch. *)
-  Lwt.return { Commit_id.repo = repo_id
-             ; id = `Ref (prefix ^ branch_name)
-             ; hash = c.commit_id
-             ; committed_date = Gitlab_json.DateTime.unwrap c.commit_created_at
-             ; message = c.commit_message }
+  match Gl.project_by_id repo_id.project_id () with
+  | None -> raise (Project_not_found repo_id.project_id)
+  | Some project ->
+    let branch_name = project.project_short_default_branch in
+    let b = Gl.branch ~project_id:project.project_short_id ~branch_name () in
+    let c = b.Gitlab_t.branch_full_commit in
+    { Commit_id.repo = repo_id
+    ; id = `Ref (prefix ^ branch_name)
+    ; hash = c.commit_id
+    ; committed_date = Gitlab_json.DateTime.unwrap c.commit_created_at
+    ; message = c.commit_message }
 
 let make_head_commit_monitor t repo =
   let read () =
-    Lwt.catch
-      (fun () -> get_default_ref t repo >|= fun c -> Ok (t, c))
-      (fun ex -> Lwt_result.fail @@ `Msg (Fmt.str "GitLab query for %a failed: %a" Repo_id.pp repo Fmt.exn ex))
+    try Ok (t, get_default_ref t repo)
+    with ex -> Error (`Msg (Fmt.str "GitLab query for %a failed: %a" Repo_id.pp repo Fmt.exn ex))
   in
   let watch refresh =
     let owner_name = Fmt.str "%a" Repo_id.to_git repo in
-    let rec aux x =
-      x >>= fun () ->
-      let x = await_event ~owner_name in
-      refresh ();
-      Lwt_unix.sleep 10.0 >>= fun () ->   (* Limit updates to 1 per 10 seconds *)
-      aux x
-    in
-    let x = await_event ~owner_name in
-    let thread =
-      Lwt.catch
-        (fun () -> aux x)
-        (function
-          | Lwt.Canceled -> Lwt.return_unit
-          | ex -> Log.err (fun f -> f "head_commit thread failed: %a" Fmt.exn ex); Lwt.return_unit
-        )
-    in
-    Lwt.return (fun () -> Lwt.cancel thread; Lwt.return_unit)
+    let stop = ref false in
+    Eio.Fiber.fork_daemon ~sw:(Current.Engine_env.get_sw ()) (fun () ->
+      let rec aux () =
+        if !stop then `Stop_daemon
+        else begin
+          (try
+             await_event ~owner_name;
+             refresh ();
+             Eio.Time.sleep (Current.Engine_env.clock ()) 10.0   (* Limit updates to 1 per 10 seconds *)
+           with ex ->
+             Log.err (fun f -> f "head_commit thread failed: %a" Fmt.exn ex));
+          aux ()
+        end
+      in
+      aux ()
+    );
+    fun () ->
+      stop := true;
+      let cond, _ = webhook_entry owner_name in
+      Eio.Condition.broadcast cond
   in
   let pp f = Fmt.pf f "Watch %a default ref head" Repo_id.pp repo in
   Current.Monitor.create ~read ~watch ~pp
@@ -332,38 +438,31 @@ module Commit = struct
         | `Pending -> `Pending
         | `Success -> `Success
       in
-      Current.Job.start job ~pool ~level:Current.Level.Above_average >>= fun () ->
+      Current.Job.start job ~pool ~level:Current.Level.Above_average;
       let { Key.commit; context } = key in
-      get_token t >>= function
+      match get_token t with
       | Error (`Msg m) -> failwith m
       | Ok token ->
-        Lwt.try_bind
-          (fun () ->
-            Gitlab.Monad.run (
-              let open Gitlab in
-              let open Monad in
-              let token = Token.of_string token in
-              let sha = commit.Commit_id.hash in
-              let project_id = commit.repo.project_id in
-              let new_status =
-                { Gitlab_t.state = (state_to_gitlab status.Status.state)
-                ; name = Some context
-                ; target_url = (Option.map Uri.to_string status.Status.url)
-                ; ref_name = None
-                ; description = None
-                ; coverage = None
-                ; pipeline_id = None
-                } in
-              Project.Commit.status ~token ~project_id ~sha new_status ()
-              >>~ fun resp -> return resp)
-          )
-          (fun (_ : Gitlab_t.commit_status) -> Lwt_result.return ())
-          (fun ex ->
-               Log.err (fun f -> f "@[<v2>%a failed: %a@]"
-                            pp (key, status)
-                            Fmt.exn ex);
-               Lwt_result.fail (`Msg (Fmt.str "Failed to set GitLab status %a" Fmt.exn ex))
-          )
+        (try
+           let sha = commit.Commit_id.hash in
+           let project_id = commit.repo.project_id in
+           let new_status : Gitlab_t.new_status =
+             { state = state_to_gitlab status.Status.state
+             ; name = Some context
+             ; target_url = Option.map Uri.to_string status.Status.url
+             ; ref_name = None
+             ; description = None
+             ; coverage = None
+             ; pipeline_id = None
+             }
+           in
+           let _ = Gl.set_commit_status ~token ~project_id ~sha new_status in
+           Ok ()
+         with ex ->
+           Log.err (fun f -> f "@[<v2>%a failed: %a@]"
+                        pp (key, status)
+                        Fmt.exn ex);
+           Error (`Msg (Fmt.str "Failed to set GitLab status %a" Fmt.exn ex)))
   end
 
   module Set_status_cache = Current_cache.Output(Set_status)
@@ -399,17 +498,11 @@ module Commit = struct
   let branch_name (_, id) = Commit_id.branch_name id
 end
 
-let query_branches token project_id =
-  let open Gitlab in
-  let open Monad in
-  let* merge_requests = Project.merge_requests ~token ~id:project_id ~state:`Opened () |> Stream.to_list in
-  let* branches = Project.Branch.branches ~token ~project_id () |> Stream.to_list in
-  let+ default_branch = return (List.find (fun branch -> branch.Gitlab_j.branch_full_default) branches) in
-  (default_branch, branches, merge_requests)
-
 let exec_query token project_id =
-  let token = Gitlab.Token.of_string token in
-  Gitlab.Monad.run (query_branches token project_id)
+  let merge_requests = Gl.merge_requests_opened ~token ~project_id () in
+  let branches = Gl.branches ~token ~project_id () in
+  let default_branch = List.find (fun br -> br.Gitlab_t.branch_full_default) branches in
+  (default_branch, branches, merge_requests)
 
 let parse_ref ~repo ~prefix (branch : Gitlab_t.branch_full) : Commit_id.t =
   let hash = branch.branch_full_commit.commit_id in
@@ -442,9 +535,10 @@ let parse_merge_request ~repo ?(branches : Gitlab_t.branch_full list = [])
     committed_date = Gitlab_json.DateTime.unwrap committed_date ; message }
 
 let get_refs t (repo : Repo_id.t) =
-  get_token t >>= function
+  match get_token t with
   | Error (`Msg m) -> failwith m
-  | Ok token -> exec_query token repo.project_id >|= fun (default_branch, branches, prs) ->
+  | Ok token ->
+    let default_branch, branches, prs = exec_query token repo.project_id in
     let prefix = "refs/heads/" in
     let refs = List.map (parse_ref ~repo ~prefix) branches in
     let prs = List.map (parse_merge_request ~repo ~branches) prs in
@@ -465,29 +559,31 @@ let get_refs t (repo : Repo_id.t) =
 
 let make_refs_monitor t repo =
   let read () =
-    Lwt.catch
-      (fun () -> get_refs t repo >|= Stdlib.Result.ok)
-      (fun ex -> Lwt_result.fail @@ `Msg (Fmt.str "GitLab query for %a failed: %a" Repo_id.pp repo Fmt.exn ex))
+    try Ok (get_refs t repo)
+    with ex -> Error (`Msg (Fmt.str "GitLab query for %a failed: %a" Repo_id.pp repo Fmt.exn ex))
   in
   let watch refresh =
     let owner_name = Fmt.str "%a" Repo_id.to_git repo in
-    let rec aux x =
-      x >>= fun () ->
-      let x = await_event ~owner_name in
-      refresh ();
-      Lwt_unix.sleep 10.0 >>= fun () ->   (* Limit updates to 1 per 10 seconds *)
-      aux x
-    in
-    let x = await_event ~owner_name in
-    let thread =
-      Lwt.catch
-        (fun () -> aux x)
-        (function
-         | Lwt.Canceled -> Lwt.return_unit  (* (could clear metrics here) *)
-         | ex -> Log.err (fun f -> f "refs thread failed: %a" Fmt.exn ex); Lwt.return_unit
-        )
-    in
-    Lwt.return (fun () -> Lwt.cancel thread; Lwt.return_unit)
+    let stop = ref false in
+    Eio.Fiber.fork_daemon ~sw:(Current.Engine_env.get_sw ()) (fun () ->
+      let rec aux () =
+        if !stop then `Stop_daemon
+        else begin
+          (try
+             await_event ~owner_name;
+             refresh ();
+             Eio.Time.sleep (Current.Engine_env.clock ()) 10.0   (* Limit updates to 1 per 10 seconds *)
+           with ex ->
+             Log.err (fun f -> f "refs thread failed: %a" Fmt.exn ex));
+          aux ()
+        end
+      in
+      aux ()
+    );
+    fun () ->
+      stop := true;
+      let cond, _ = webhook_entry owner_name in
+      Eio.Condition.broadcast cond
   in
   let pp f = Fmt.pf f "Watch %a CI refs" Repo_id.pp repo in
   Current.Monitor.create ~read ~watch ~pp
@@ -575,53 +671,47 @@ end
 module Anonymous = struct
 
   let query_head (repo : Repo_id.t) (gref : Ref.t) =
-    let cmd =
-      let open Gitlab in
-      let open Monad in
-      let project_id = repo.project_id in
-      match gref with
-      | `Ref the_ref ->
-        Project.Commit.commits ~project_id ~ref_name:the_ref () |> Stream.next
-        >|= fun x -> Option.map (fun (x,_) -> x.Gitlab_t.commit_id) x |> Option.get
-      | `MR mr_no ->
-        Project.merge_request ~project_id ~merge_request_iid:(string_of_int mr_no.id) () >>~ fun x ->
-        (* TODO: Recover if the merge request does not have a SHA *)
-        return @@ Option.get x.Gitlab_t.merge_request_sha
-    in
-    Gitlab.Monad.run cmd
+    let project_id = repo.project_id in
+    match gref with
+    | `Ref the_ref ->
+      Gl.latest_commit_on_ref ~project_id ~ref_name:the_ref ()
+    | `MR mr_no ->
+      let mr = Gl.merge_request ~project_id ~iid:(string_of_int mr_no.id) () in
+      (* TODO: Recover if the merge request does not have a SHA *)
+      Option.get mr.Gitlab_t.merge_request_sha
 
   let head_of (repo : Repo_id.t) (gref : Ref.t)=
     let owner_name = Fmt.str "%a" Repo_id.to_git repo in
     let read () =
-      Lwt.try_bind
-        (fun () -> query_head repo gref)
-        (fun hash ->
-            let id = { Commit_id.repo; hash; id = gref; committed_date = "" ; message = ""} in
-          Lwt_result.return (Commit_id.to_git id)
-        )
-        (fun ex ->
-           Log.warn (fun f -> f "GitLab query_head failed: %a" Fmt.exn ex);
-           Lwt_result.fail (`Msg (Fmt.str "Failed to get head of %a:%a" Repo_id.pp repo Ref.pp gref))
-        )
+      try
+        let hash = query_head repo gref in
+        let id = { Commit_id.repo; hash; id = gref; committed_date = "" ; message = ""} in
+        Ok (Commit_id.to_git id)
+      with ex ->
+        Log.warn (fun f -> f "GitLab query_head failed: %a" Fmt.exn ex);
+        Error (`Msg (Fmt.str "Failed to get head of %a:%a" Repo_id.pp repo Ref.pp gref))
     in
     let watch refresh =
-      let rec aux x =
-        x >>= fun () ->
-        let x = await_event ~owner_name in
-        refresh ();
-        Lwt_unix.sleep 10.0 >>= fun () ->   (* Limit updates to 1 per 10 seconds *)
-        aux x
-      in
-      let x = await_event ~owner_name in
-      let thread =
-        Lwt.catch
-          (fun () -> aux x)
-          (function
-            | Lwt.Canceled -> Lwt.return_unit
-            | ex -> Log.err (fun f -> f "Anonymous.head thread failed: %a" Fmt.exn ex); Lwt.return_unit
-          )
-      in
-      Lwt.return (fun () -> Lwt.cancel thread; Lwt.return_unit)
+      let stop = ref false in
+      Eio.Fiber.fork_daemon ~sw:(Current.Engine_env.get_sw ()) (fun () ->
+        let rec aux () =
+          if !stop then `Stop_daemon
+          else begin
+            (try
+               await_event ~owner_name;
+               refresh ();
+               Eio.Time.sleep (Current.Engine_env.clock ()) 10.0
+             with ex ->
+               Log.err (fun f -> f "Anonymous.head thread failed: %a" Fmt.exn ex));
+            aux ()
+          end
+        in
+        aux ()
+      );
+      fun () ->
+        stop := true;
+        let cond, _ = webhook_entry owner_name in
+        Eio.Condition.broadcast cond
     in
     let pp f = Fmt.pf f "Query head of %a:%a" Repo_id.pp repo Ref.pp gref in
     let monitor = Current.Monitor.create ~read ~watch ~pp in

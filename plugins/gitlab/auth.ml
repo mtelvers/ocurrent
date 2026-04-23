@@ -1,6 +1,4 @@
-open Lwt.Infix
-
-module Server = Cohttp_lwt_unix.Server
+module Server = Current_web.Utils.Server
 
 type t = {
   client_id : string;
@@ -12,37 +10,62 @@ type t = {
 let v ?(scopes=["read_user"]) ~client_id ~client_secret ~redirect_uri () =
   { client_id; client_secret; scopes; redirect_uri }
 
+(* Known GitLab OAuth scopes. See
+   https://docs.gitlab.com/ee/integration/oauth_provider.html *)
+let known_scopes = [
+  "api"; "read_api"; "read_user"; "read_repository"; "write_repository";
+  "read_registry"; "write_registry"; "sudo"; "openid"; "profile"; "email";
+]
+
 exception ScopeOfString of string
 
-let scope_of_string scope =
-  match Gitlab.Scope.of_string scope with
-  | Some s -> s
-  | None -> raise @@ ScopeOfString ("Invalid option for scope_of_string :" ^ scope)
+let validate_scope scope =
+  if List.mem scope known_scopes then scope
+  else raise @@ ScopeOfString ("Invalid OAuth scope: " ^ scope)
 
 let make_login_uri t ~csrf =
-  Gitlab.Token.create_url
-    ~client_id: t.client_id
-    ~redirect_uri:(Uri.of_string t.redirect_uri)
-    ~state:csrf
-    ~scopes: (List.map scope_of_string t.scopes)
-    ()
+  let scopes = String.concat " " (List.map validate_scope t.scopes) in
+  Uri.with_query'
+    (Uri.of_string "https://gitlab.com/oauth/authorize")
+    [
+      "client_id", t.client_id;
+      "redirect_uri", t.redirect_uri;
+      "response_type", "code";
+      "state", csrf;
+      "scope", scopes;
+    ]
 
+(* POST https://gitlab.com/oauth/token with the authorization code to get
+   an access token.  Returns [Some token] on success. *)
 let get_access_token t code =
-  Gitlab.Token.of_code
-    ~client_id: t.client_id
-    ~code
-    ~client_secret: t.client_secret
-    ~redirect_uri: t.redirect_uri
-    ()
-
-let get_user token =
-  let open Gitlab in
-  let open Monad in
-  let cmd =
-    User.current_user ~token () >|~ fun user ->
-    Ok ("gitlab:" ^ user.Gitlab_t.current_user_username)
+  let uri = Uri.of_string "https://gitlab.com/oauth/token" in
+  let form =
+    Uri.encoded_of_query [
+      "client_id",     [t.client_id];
+      "client_secret", [t.client_secret];
+      "code",          [code];
+      "grant_type",    ["authorization_code"];
+      "redirect_uri",  [t.redirect_uri];
+    ]
   in
-  run cmd
+  let headers = Cohttp.Header.init_with "Content-Type" "application/x-www-form-urlencoded" in
+  let resp, body = Current_http.post ~headers ~body:form uri in
+  match Cohttp.Response.status resp with
+  | `OK ->
+    let json = Yojson.Safe.from_string body in
+    Some (Yojson.Safe.Util.(json |> member "access_token" |> to_string))
+  | _ -> None
+
+(* GET https://gitlab.com/api/v4/user with the bearer token. *)
+let get_user token =
+  let headers = Cohttp.Header.init_with "Authorization" ("Bearer " ^ token) in
+  let uri = Uri.of_string "https://gitlab.com/api/v4/user" in
+  let resp, body = Current_http.get ~headers uri in
+  match Cohttp.Response.status resp with
+  | `OK ->
+    let user = Gitlab_j.current_user_of_string body in
+    Ok ("gitlab:" ^ user.Gitlab_t.current_user_username)
+  | status -> Error (status, body)
 
 let example_config () =
   v ~client_id:"..." ~client_secret:"..." ~redirect_uri:"..." ()
@@ -62,7 +85,7 @@ let configuration_howto ctx =
 
 let login t : Current_web.Resource.t = object
   method get_raw site request =
-    Current_web.Context.of_request ~site request >>= fun ctx ->
+    let ctx = Current_web.Context.of_request ~site request in
     match t with
     | None -> configuration_howto ctx
     | Some t ->
@@ -74,11 +97,11 @@ let login t : Current_web.Resource.t = object
         if state <> Current_web.Context.csrf ctx then (
           Server.respond_error ~status:`Bad_request ~body:"Bad CSRF token" ()
         ) else (
-          get_access_token t code >>= function
+          match get_access_token t code with
           | None ->
             Server.respond_error ~status:`Internal_server_error ~body:"Failed to get token" ()
           | Some token ->
-            get_user token >>= function
+            match get_user token with
             | Error (status, msg) ->
               Log.warn (fun f -> f "Failed to get user details from GitLab: %s: %s" (Cohttp.Code.string_of_status status) msg);
               Server.respond_error ~status:`Internal_server_error ~body:"Failed to get user details" ()
