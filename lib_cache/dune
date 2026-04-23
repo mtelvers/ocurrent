@@ -6,10 +6,9 @@
   current_term
   current_incr
   duration
+  eio
   fmt
   logs
-  lwt
-  lwt.unix
   prometheus
   re
   result

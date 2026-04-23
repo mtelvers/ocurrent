@@ -22,6 +22,6 @@ let get_sw () =
   | Some s -> s
   | None -> failwith "Engine has not been started (Engine.create not called)"
 
-let clock () = Eio.Stdenv.clock (get_env ())
-let process_mgr () = Eio.Stdenv.process_mgr (get_env ())
-let fs () = Eio.Stdenv.fs (get_env ())
+let clock () : _ Eio.Time.clock = Eio.Stdenv.clock (get_env ())
+let process_mgr () : _ Eio.Process.mgr = Eio.Stdenv.process_mgr (get_env ())
+let fs () : _ Eio.Path.t = Eio.Stdenv.fs (get_env ())

@@ -147,6 +147,22 @@ module Unit : sig
   val unmarshal : string -> t
 end
 
+(** Pragmatic global stash for the engine's env and switch. [Engine.create]
+    requires that [Engine_env.init ~sw ~env] has been called first. Lower-level
+    modules (Job, Process, the cache) use this to access capabilities without
+    threading them through every signature. *)
+module Engine_env : sig
+  val init : sw:Eio.Switch.t -> env:Eio_unix.Stdenv.base -> unit
+  (** [init ~sw ~env] stashes the engine's switch and env. Call this before
+      {!Engine.create}. *)
+
+  val get_sw : unit -> Eio.Switch.t
+  val get_env : unit -> Eio_unix.Stdenv.base
+  val clock : unit -> float Eio.Time.clock_ty Eio.Resource.t
+  val process_mgr : unit -> Eio_unix.Process.mgr_ty Eio.Resource.t
+  val fs : unit -> Eio.Fs.dir_ty Eio.Path.t
+end
+
 (** Like [Lwt_switch], but the cleanup functions are called in sequence, not
     in parallel. *)
 module Switch : sig

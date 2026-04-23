@@ -1,5 +1,3 @@
-open Lwt.Infix
-
 module Job = Current.Job
 
 module Metrics = struct
@@ -213,120 +211,120 @@ module Generic(Op : S.GENERIC) = struct
       t.op <- `Active (op, latched);
       let pp_op f = pp_op f (t.key, op.value) in
       Job.log job "New job: %t" pp_op;
-      Lwt.async
-        (fun () ->
-           Job.start_time job >>= fun _ ->
-           Lwt.pause () >|= fun () ->        (* Ensure we're outside any propagate *)
-           notify t
-        );
+      Eio.Fiber.fork ~sw:(Current.Engine_env.get_sw ()) (fun () ->
+        let _ = Eio.Promise.await (Job.start_time job) in
+        Eio.Fiber.yield ();        (* Ensure we're outside any propagate *)
+        notify t
+      );
       let key_digest = Op.Key.digest t.key in
       Hashtbl.add key_of_job_id job_id (Op.id, key_digest);
       Hashtbl.add job_id_of_key (Op.id, key_digest) job_id;
-      Lwt.async
-        (fun () ->
-           Lwt.finalize
-             (fun () ->
-                Lwt.catch
-                  (fun () -> Op.run ctx job t.key (Value.value op.value))
-                  (fun ex -> Lwt.return (Error (`Msg (Printexc.to_string ex))))
-                >>= fun outcome ->
-                Lwt.pause () >|= fun () ->        (* Ensure we're outside any propagate *)
-                let end_time = Unix.gmtime @@ !Job.timestamp () in
-                if op.autocancelled then (
-                  t.op <- `Retry latched;
-                  invalidate t
-                ) else (
-                  (* Record the result *)
-                  let running =
-                    match Lwt.state (Job.start_time job) with
-                    | Lwt.Return x -> Some (Unix.gmtime x)
-                    | Lwt.Sleep when Stdlib.Result.is_ok outcome -> Fmt.failwith "Job.start not called!";
-                    | _ -> None
-                  in
-                  let outcome =
-                    match Current.Job.cancelled_state op.job, outcome with
-                    | Error (`Msg msg), _ ->
-                      Job.log job "%s" msg;
-                      Error (`Msg "Cancelled")
-                    | Ok (), Ok _ -> Job.log job "Job succeeded"; outcome
-                    | Ok (), Error (`Msg m) ->
-                      Job.log job "Job failed: %s" m;
-                      match Current.Log_matcher.analyse_job job with
-                      | None -> outcome
-                      | Some e -> Error (`Msg e)
-                  in
-                  t.mtime <- !Job.timestamp ();
-                  let job_id = Job.id job in
-                  Db.record ~op:Op.id ~job_id
-                    ~key:key_digest
-                    ~value:(Value.digest op.value)
-                    ~ready ~running ~finished:end_time
-                    ~build:t.build_number
-                    (Stdlib.Result.map Op.Outcome.marshal outcome);
-                  t.build_number <- Int64.succ t.build_number;
-                  match outcome with
-                  | Ok outcome ->
-                    t.current <- Some (Value.digest op.value);
-                    t.op <- `Finished (Ok outcome);
-                  | Error e ->
-                    if Value.equal op.value t.desired then (
-                      t.op <- `Finished (Error e)
-                    ) else (
-                      (* It failed, but we have a new value to set: ignore the stale error. *)
-                      t.op <- `Retry None;
-                      invalidate t
-                    )
-                )
-             )
-             (fun () ->
-                Hashtbl.remove key_of_job_id (Job.id job);
-                Hashtbl.remove job_id_of_key (Op.id, key_digest);
-                Current.Switch.turn_off switch >|= fun () ->
-                (* While we were working, we might have decided we wanted something else.
-                   If so, start that now. *)
-                if t.ref_count > 0 then maybe_restart ~config t
-                else t.release ()
-             )
-        )
+      Eio.Fiber.fork ~sw:(Current.Engine_env.get_sw ()) (fun () ->
+        Fun.protect
+          (fun () ->
+             let outcome =
+               try Op.run ctx job t.key (Value.value op.value)
+               with ex -> Error (`Msg (Printexc.to_string ex))
+             in
+             Eio.Fiber.yield ();        (* Ensure we're outside any propagate *)
+             let end_time = Unix.gmtime @@ !Job.timestamp () in
+             if op.autocancelled then (
+               t.op <- `Retry latched;
+               invalidate t
+             ) else (
+               (* Record the result *)
+               let running =
+                 match Eio.Promise.peek (Job.start_time job) with
+                 | Some x -> Some (Unix.gmtime x)
+                 | None when Stdlib.Result.is_ok outcome -> Fmt.failwith "Job.start not called!";
+                 | None -> None
+               in
+               let outcome =
+                 match Current.Job.cancelled_state op.job, outcome with
+                 | Error (`Msg msg), _ ->
+                   Job.log job "%s" msg;
+                   Error (`Msg "Cancelled")
+                 | Ok (), Ok _ -> Job.log job "Job succeeded"; outcome
+                 | Ok (), Error (`Msg m) ->
+                   Job.log job "Job failed: %s" m;
+                   match Current.Log_matcher.analyse_job job with
+                   | None -> outcome
+                   | Some e -> Error (`Msg e)
+               in
+               t.mtime <- !Job.timestamp ();
+               let job_id = Job.id job in
+               Db.record ~op:Op.id ~job_id
+                 ~key:key_digest
+                 ~value:(Value.digest op.value)
+                 ~ready ~running ~finished:end_time
+                 ~build:t.build_number
+                 (Stdlib.Result.map Op.Outcome.marshal outcome);
+               t.build_number <- Int64.succ t.build_number;
+               match outcome with
+               | Ok outcome ->
+                 t.current <- Some (Value.digest op.value);
+                 t.op <- `Finished (Ok outcome);
+               | Error e ->
+                 if Value.equal op.value t.desired then (
+                   t.op <- `Finished (Error e)
+                 ) else (
+                   (* It failed, but we have a new value to set: ignore the stale error. *)
+                   t.op <- `Retry None;
+                   invalidate t
+                 )
+             ))
+          ~finally:(fun () ->
+             Hashtbl.remove key_of_job_id (Job.id job);
+             Hashtbl.remove job_id_of_key (Op.id, key_digest);
+             Current.Switch.turn_off switch;
+             (* While we were working, we might have decided we wanted something else.
+                If so, start that now. *)
+             if t.ref_count > 0 then maybe_restart ~config t
+             else t.release ()
+          )
+      )
 
     let limit_expires t time =
       let set () =
         let remaining_time = time -. !Job.timestamp () in
-        let sleep_thread = if remaining_time > 0.0 then !Job.sleep remaining_time else Lwt.return_unit in
+        let cancel_p, cancel_r = Eio.Promise.create () in
         let cancelled = ref false in
-        Lwt.async
-          (fun () ->
-             Lwt.try_bind
-               (fun () -> sleep_thread)
-               (fun () ->
-                  Lwt.pause () >|= fun () ->        (* Ensure we're outside any propagate *)
-                  if not !cancelled then (
-                    t.expires <- None;
-                    Log.info (fun f -> f "Result for %a has expired" pp_desired t);
-                    let latched =
-                      match t.op with
-                      | `Finished x -> Some x
-                      | `Retry x -> x
-                      | _ -> None
-                    in
-                    t.op <- `Retry latched;
-                    t.current <- None;
-                    match Current_incr.observe Current.Config.now with
-                    | Some config -> maybe_restart ~config t
-                    | None -> Log.warn (fun f -> f "Can't trigger restart as config is now None (shutting down?)")
-                  )
-               )
-               (function
-                 | Lwt.Canceled ->
-                   Lwt.return_unit
-                 | ex ->
-                   Log.err (fun f -> f "Expiry thread failed: %a" Fmt.exn ex);
-                   Lwt.return_unit
-               );
-          );
+        Eio.Fiber.fork ~sw:(Current.Engine_env.get_sw ()) (fun () ->
+          let result =
+            try
+              Eio.Fiber.first
+                (fun () ->
+                   if remaining_time > 0.0 then !Job.sleep remaining_time;
+                   `Fired)
+                (fun () -> Eio.Promise.await cancel_p; `Cancelled)
+            with ex ->
+              Log.err (fun f -> f "Expiry thread failed: %a" Fmt.exn ex);
+              `Cancelled
+          in
+          match result with
+          | `Cancelled -> ()
+          | `Fired ->
+            Eio.Fiber.yield ();        (* Ensure we're outside any propagate *)
+            if not !cancelled then (
+              t.expires <- None;
+              Log.info (fun f -> f "Result for %a has expired" pp_desired t);
+              let latched =
+                match t.op with
+                | `Finished x -> Some x
+                | `Retry x -> x
+                | _ -> None
+              in
+              t.op <- `Retry latched;
+              t.current <- None;
+              match Current_incr.observe Current.Config.now with
+              | Some config -> maybe_restart ~config t
+              | None -> Log.warn (fun f -> f "Can't trigger restart as config is now None (shutting down?)")
+            )
+        );
         let cancel () =
-          Lwt.cancel sleep_thread;
-          cancelled := true
+          cancelled := true;
+          if not (Eio.Promise.is_resolved cancel_p) then
+            try Eio.Promise.resolve cancel_r () with _ -> ()
         in
         t.expires <- Some (time, cancel)
       in
@@ -469,7 +467,7 @@ module Generic(Op : S.GENERIC) = struct
         | `Active (op, latched) ->
           let a =
             let started = Job.start_time op.job in
-            if Lwt.state started = Lwt.Sleep then
+            if not (Eio.Promise.is_resolved started) then
               if Job.is_waiting_for_confirmation op.job then
                 `Waiting_for_confirmation
               else
