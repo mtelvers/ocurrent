@@ -91,7 +91,7 @@ module Raw : sig
 
   (** Building Docker commands. *)
   module Cmd : sig
-    type t = Lwt_process.command
+    type t = string list
 
     val docker : string list -> docker_context:string option -> t
     (** [docker ~docker_context args] is a command to run docker, with the "--context" argument added (if necessary).
@@ -102,8 +102,8 @@ module Raw : sig
       kill_on_cancel:bool ->
       job:Current.Job.t ->
       t ->
-      (string -> 'a Current.or_error Lwt.t) ->
-      'a Current.or_error Lwt.t
+      (string -> 'a Current.or_error) ->
+      'a Current.or_error
     (** [with_container ~kill_on_cancel ~job t fn] runs [t] to create a new
         container (the output is the container ID), then calls [fn id].
         When [fn] returns, it removes the container (killing it first if necessary).

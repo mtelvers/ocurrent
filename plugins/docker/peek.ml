@@ -1,8 +1,6 @@
-open Lwt.Infix
+open Current.Result.Syntax
 
 type t = No_context
-
-let ( >>!= ) = Lwt_result.bind
 
 module Key = struct
   type t = {
@@ -21,16 +19,18 @@ module Value = Current.String
 let id = "docker-peek"
 
 let build No_context job key =
-  Current.Job.start job ~level:Current.Level.Mostly_harmless >>= fun () ->
+  Current.Job.start job ~level:Current.Level.Mostly_harmless;
   let { Key.docker_context = _; tag; arch } = key in
   Prometheus.Gauge.inc_one Metrics.docker_peek_events;
-  Current.Process.check_output ~cancellable:true ~job (Key.cmd key) >>!= (fun manifest ->
-    match Pull.get_digest_from_manifest manifest arch with
-    | Error _ as e -> Lwt.return e
-    | Ok hash ->
-      Current.Job.log job "Got %S" hash;
-      Lwt_result.return (tag ^ "@" ^ hash))
-  >|= (fun res -> Prometheus.Gauge.dec_one Metrics.docker_peek_events; res)
+  Fun.protect
+    ~finally:(fun () -> Prometheus.Gauge.dec_one Metrics.docker_peek_events)
+    (fun () ->
+      let* manifest = Current.Process.check_output ~cancellable:true ~job (Key.cmd key) in
+      match Pull.get_digest_from_manifest manifest arch with
+      | Error _ as e -> e
+      | Ok hash ->
+        Current.Job.log job "Got %S" hash;
+        Ok (tag ^ "@" ^ hash))
 
 let pp f key = Cmd.pp f (Key.cmd key)
 

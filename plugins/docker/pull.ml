@@ -1,10 +1,7 @@
-open Lwt.Infix
-
+open Current.Result.Syntax
 open Auth
 
 type t = auth option
-
-let ( >>!= ) = Lwt_result.bind
 
 let id = "docker-pull"
 
@@ -40,30 +37,30 @@ let get_digest_from_manifest manifest arch =
         (Yojson.Basic.pretty_print ~std:true) json
 
 let build auth job key =
-  Current.Job.start job ~level:Current.Level.Mostly_harmless >>= fun () ->
+  Current.Job.start job ~level:Current.Level.Mostly_harmless;
   let { Key.docker_context; tag; arch } = key in
-  Auth.login ~docker_context ~job auth >>!= (fun () ->
+  let* () = Auth.login ~docker_context ~job auth in
   Prometheus.Gauge.inc_one Metrics.docker_pull_events;
-  match arch with
-  | None -> begin
-      Current.Process.exec ~cancellable:true ~job (Key.cmd key) >>!= fun () ->
-      let cmd = Cmd.docker ~docker_context ["image"; "inspect"; tag; "-f"; "{{index .RepoDigests 0}}"] in
-      Current.Process.check_output ~cancellable:false ~job cmd >>!= fun id ->
-      let id = String.trim id in
-      Current.Job.log job "Pulled %S -> %S" tag id;
-      Lwt_result.return (Image.of_hash id)
-    end
-  | Some arch -> begin
-      let cmd = Cmd.docker ~docker_context ["manifest"; "inspect"; tag ] in
-      Current.Process.check_output ~cancellable:true ~job cmd >>!= fun manifest ->
-      match get_digest_from_manifest manifest arch with
-      | Error _ as e -> Lwt.return e
-      | Ok hash ->
-        let full_tag = tag ^ "@" ^ hash in
-        Current.Process.exec ~cancellable:true ~job (Key.cmd {key with Key.tag=full_tag}) >>!= fun () ->
-        Lwt_result.return (Image.of_hash full_tag)
-    end)
-  >|= (fun res -> Prometheus.Gauge.dec_one Metrics.docker_pull_events; res)
+  Fun.protect
+    ~finally:(fun () -> Prometheus.Gauge.dec_one Metrics.docker_pull_events)
+    (fun () ->
+      match arch with
+      | None ->
+        let* () = Current.Process.exec ~cancellable:true ~job (Key.cmd key) in
+        let cmd = Cmd.docker ~docker_context ["image"; "inspect"; tag; "-f"; "{{index .RepoDigests 0}}"] in
+        let* id = Current.Process.check_output ~cancellable:false ~job cmd in
+        let id = String.trim id in
+        Current.Job.log job "Pulled %S -> %S" tag id;
+        Ok (Image.of_hash id)
+      | Some arch ->
+        let cmd = Cmd.docker ~docker_context ["manifest"; "inspect"; tag ] in
+        let* manifest = Current.Process.check_output ~cancellable:true ~job cmd in
+        (match get_digest_from_manifest manifest arch with
+         | Error _ as e -> e
+         | Ok hash ->
+           let full_tag = tag ^ "@" ^ hash in
+           let* () = Current.Process.exec ~cancellable:true ~job (Key.cmd {key with Key.tag=full_tag}) in
+           Ok (Image.of_hash full_tag)))
 
 let pp f key = Cmd.pp f (Key.cmd key)
 

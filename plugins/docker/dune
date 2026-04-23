@@ -8,11 +8,10 @@
   current_term
   current_git
   duration
+  eio
   fmt
   fpath
   logs
-  lwt
-  lwt.unix
   ppx_deriving_yojson.runtime
   result)
  (preprocess

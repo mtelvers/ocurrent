@@ -1,4 +1,4 @@
-open Lwt.Infix
+open Current.Result.Syntax
 
 type t = {
   pull : bool;
@@ -8,12 +8,6 @@ type t = {
 }
 
 let id = "docker-build"
-
-let use_pool pool f =
-  match pool with
-  | None -> f ()
-  | Some pool ->
-    Lwt_pool.use pool f
 
 module Key = struct
   type t = {
@@ -62,12 +56,14 @@ let or_raise = function
   | Error (`Msg m) -> raise (Failure m)
 
 let with_context ~job context fn =
-  let open Lwt_result.Infix in
   match context with
   | `No_context -> Current.Process.with_tmpdir ~prefix:"build-context-" fn
   | `Dir path ->
       Current.Process.with_tmpdir ~prefix:"build-context-" @@ fun dir ->
-      Current.Process.exec ~cwd:dir ~cancellable:true ~job ("", [| "rsync"; "-aHq"; Fpath.to_string path ^ "/"; "." |]) >>= fun () ->
+      let* () =
+        Current.Process.exec ~cwd:dir ~cancellable:true ~job
+          ["rsync"; "-aHq"; Fpath.to_string path ^ "/"; "."]
+      in
       fn dir
   | `Git commit -> Current_git.with_checkout ~job commit fn
 
@@ -79,7 +75,7 @@ let build { pull; pool; timeout; level } job key =
     | `File _ -> ()
   end;
   let level = Option.value level ~default:Current.Level.Average in
-  Current.Job.start ?timeout ?pool job ~level >>= fun () ->
+  Current.Job.start ?timeout ?pool job ~level;
   with_context ~job commit @@ fun dir ->
   let dir = match path with
     | Some path -> Fpath.(dir // path)
@@ -106,14 +102,15 @@ let build { pull; pool; timeout; level } job key =
   in
   let pp_error_command f = Fmt.string f "Docker build" in
   Prometheus.Gauge.inc_one Metrics.docker_build_events;
-  Current.Process.exec ~cancellable:true ~pp_error_command ~job cmd
-  >|= (function
-  | Error _ as e -> e
-  | Ok () ->
-    Bos.OS.File.read iidfile |> Stdlib.Result.map @@ fun hash ->
-    Log.info (fun f -> f "Built docker image %s" hash);
-    Image.of_hash hash)
-  >|= (fun res -> Prometheus.Gauge.dec_one Metrics.docker_build_events; res)
+  Fun.protect
+    ~finally:(fun () -> Prometheus.Gauge.dec_one Metrics.docker_build_events)
+    (fun () ->
+      match Current.Process.exec ~cancellable:true ~pp_error_command ~job cmd with
+      | Error _ as e -> e
+      | Ok () ->
+        Bos.OS.File.read iidfile |> Stdlib.Result.map @@ fun hash ->
+        Log.info (fun f -> f "Built docker image %s" hash);
+        Image.of_hash hash)
 
 let pp f key = Fmt.pf f "@[<v2>docker build %a@]" Key.pp key
 

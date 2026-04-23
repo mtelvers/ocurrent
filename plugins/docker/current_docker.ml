@@ -65,11 +65,9 @@ module Raw = struct
      CCC.set Compose_cli.{ pull } { Compose_cli.Key.name; docker_context; detach ; up_args } { Compose_cli.Value.contents }
 
   module Cmd = struct
-    open Lwt.Infix
+    open Current.Result.Syntax
 
-    let ( >>!= ) = Lwt_result.bind
-
-    type t = Lwt_process.command
+    type t = string list
 
     let docker args ~docker_context = Cmd.docker ~docker_context args
 
@@ -78,31 +76,25 @@ module Raw = struct
 
     (* Try to "docker kill $id". If it fails, just log a warning and continue. *)
     let try_kill_container ~docker_context ~job id =
-      Current.Process.exec ~cancellable:false ~job (kill ~docker_context id) >|= function
+      match Current.Process.exec ~cancellable:false ~job (kill ~docker_context id) with
       | Ok () -> ()
       | Error (`Msg m) -> Current.Job.log job "Warning: Failed to kill container %S: %s" id m
 
     let with_container ~docker_context ~kill_on_cancel ~job t fn =
-      Current.Process.check_output ~cancellable:false ~job t >>!= fun id ->
+      let* id = Current.Process.check_output ~cancellable:false ~job t in
       let id = String.trim id in
       let did_rm = ref false in
-      Lwt.catch
-        (fun () ->
-           begin
-             if kill_on_cancel then (
-               Current.Job.on_cancel job (fun _ ->
-                   if !did_rm = false then try_kill_container ~docker_context ~job id
-                   else Lwt.return_unit
-                 )
-             ) else (
-               Lwt.return_unit
-             )
-           end >>= fun () ->
-           fn id )
-        (fun ex -> Lwt.return (Fmt.error_msg "with_container: uncaught exception: %a" Fmt.exn ex))
-      >>= fun result ->
+      let result =
+        try
+          if kill_on_cancel then
+            Current.Job.on_cancel job (fun _ ->
+              if not !did_rm then try_kill_container ~docker_context ~job id);
+          fn id
+        with ex ->
+          Fmt.error_msg "with_container: uncaught exception: %a" Fmt.exn ex
+      in
       did_rm := true;
-      Current.Process.exec ~cancellable:false ~job (rm_f ~docker_context id) >|= function
+      match Current.Process.exec ~cancellable:false ~job (rm_f ~docker_context id) with
       | Ok () -> result         (* (the common case, where removing the container succeeds) *)
       | Error (`Msg rm_error) as rm_e ->
         match result with

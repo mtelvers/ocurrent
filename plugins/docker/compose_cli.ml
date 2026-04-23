@@ -1,4 +1,4 @@
-open Lwt.Infix
+open Current.Result.Syntax
 
 type t = {
   pull: bool ;
@@ -40,14 +40,12 @@ let cmd_update ({ Key.detach; up_args; _ } as key) =
   cmd ("up" :: args) key
 
 let publish { pull } job key {Value.contents} =
-  Current.Job.start job ~level:Current.Level.Dangerous >>= fun () ->
-  let p =
+  Current.Job.start job ~level:Current.Level.Dangerous;
+  let* () =
     if pull then Current.Process.exec ~stdin:contents ~cancellable:true ~job (cmd_pull key)
-    else Lwt.return (Ok ())
+    else Ok ()
   in
-  p >>= function
-  | Error _ as e -> Lwt.return e
-  | Ok () -> Current.Process.exec ~stdin:contents ~cancellable:true ~job (cmd_update key)
+  Current.Process.exec ~stdin:contents ~cancellable:true ~job (cmd_update key)
 
 let pp f (key, { Value.contents }) =
   Fmt.pf f "%a@.@[%a@]" Cmd.pp (cmd_update key) Fmt.string contents
