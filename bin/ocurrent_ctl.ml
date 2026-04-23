@@ -1,16 +1,11 @@
 (** ocurrent-ctl - CLI tool for controlling OCurrent pipelines via RPC *)
 
-open Lwt.Infix
-open Capnp_rpc_lwt
-
 let () = Prometheus_unix.Logging.init ~default_level:Logs.Warning ()
 
-(* Convert RPC errors to simple messages for Cmdliner *)
 let to_msg_error = function
   | Ok x -> Ok x
   | Error `Capnp ex -> Error (`Msg (Fmt.to_to_string Capnp_rpc.Error.pp ex))
 
-(* Helper for formatting timestamps *)
 let pp_timestamp ppf ts =
   let open Unix in
   let tm = localtime ts in
@@ -18,16 +13,14 @@ let pp_timestamp ppf ts =
     (tm.tm_year + 1900) (tm.tm_mon + 1) tm.tm_mday
     tm.tm_hour tm.tm_min tm.tm_sec
 
-(* Connect to engine *)
-let connect cap_file =
-  let vat = Capnp_rpc_unix.client_only_vat () in
-  let sr = Capnp_rpc_unix.Vat.import_exn vat cap_file in
-  Sturdy_ref.connect_exn sr
+let connect ~sw net cap_file =
+  let vat = Capnp_rpc_unix.client_only_vat ~sw net in
+  Capnp_rpc_unix.Vat.import_exn vat cap_file
 
 (* ===== Engine Operations ===== *)
 
 let list_jobs engine =
-  Current_rpc.Engine.active_jobs engine |> Lwt_result.map @@ fun jobs ->
+  Current_rpc.Engine.active_jobs engine |> Result.map @@ fun jobs ->
   if jobs = [] then
     Fmt.pr "No active jobs@."
   else begin
@@ -38,7 +31,7 @@ let list_jobs engine =
 
 let query_jobs engine ~op ~ok ~rebuild ~job_prefix =
   let params = { Current_rpc.Engine.op; ok; rebuild; job_prefix } in
-  Current_rpc.Engine.query engine params |> Lwt_result.map @@ fun entries ->
+  Current_rpc.Engine.query engine params |> Result.map @@ fun entries ->
   if entries = [] then
     Fmt.pr "No matching jobs found@."
   else begin
@@ -67,7 +60,7 @@ let query_jobs engine ~op ~ok ~rebuild ~job_prefix =
   end
 
 let list_ops engine =
-  Current_rpc.Engine.ops engine |> Lwt_result.map @@ fun ops ->
+  Current_rpc.Engine.ops engine |> Result.map @@ fun ops ->
   if ops = [] then
     Fmt.pr "No operations found@."
   else begin
@@ -77,7 +70,7 @@ let list_ops engine =
   end
 
 let show_stats engine =
-  Current_rpc.Engine.pipeline_stats engine |> Lwt_result.map @@
+  Current_rpc.Engine.pipeline_stats engine |> Result.map @@
   fun (stats : Current_rpc.Engine.stats) ->
   Fmt.pr "@[<v>Pipeline Statistics:@,\
           OK:                     %d@,\
@@ -94,7 +87,7 @@ let show_stats engine =
     stats.blocked
 
 let show_state engine =
-  Current_rpc.Engine.pipeline_state engine |> Lwt_result.map @@ fun state ->
+  Current_rpc.Engine.pipeline_state engine |> Result.map @@ fun state ->
   let state_str = match state with
     | Current_rpc.Engine.Success -> "SUCCESS"
     | Current_rpc.Engine.Failed msg -> Fmt.str "FAILED: %s" msg
@@ -105,11 +98,11 @@ let show_state engine =
   Fmt.pr "Pipeline State: %s@." state_str
 
 let show_dot engine =
-  Current_rpc.Engine.pipeline_dot engine |> Lwt_result.map @@ fun dot ->
+  Current_rpc.Engine.pipeline_dot engine |> Result.map @@ fun dot ->
   print_string dot
 
 let get_confirm_level engine =
-  Current_rpc.Engine.get_confirm_level engine |> Lwt_result.map @@ fun level ->
+  Current_rpc.Engine.get_confirm_level engine |> Result.map @@ fun level ->
   match level with
   | None -> Fmt.pr "Confirmation: disabled@."
   | Some l ->
@@ -123,7 +116,7 @@ let get_confirm_level engine =
     Fmt.pr "Confirmation level: %s@." name
 
 let set_confirm_level engine level =
-  Current_rpc.Engine.set_confirm_level engine level |> Lwt_result.map @@ fun () ->
+  Current_rpc.Engine.set_confirm_level engine level |> Result.map @@ fun () ->
   match level with
   | None -> Fmt.pr "Confirmation disabled@."
   | Some l ->
@@ -137,7 +130,7 @@ let set_confirm_level engine level =
     Fmt.pr "Confirmation level set to: %s@." name
 
 let rebuild_all engine job_ids =
-  Current_rpc.Engine.rebuild_all engine job_ids |> Lwt_result.map @@
+  Current_rpc.Engine.rebuild_all engine job_ids |> Result.map @@
   fun (result : Current_rpc.Engine.rebuild_result) ->
   if result.succeeded <> [] then begin
     Fmt.pr "@[<v>Rebuild queued:@,";
@@ -155,20 +148,20 @@ let rebuild_all engine job_ids =
 
 let show_log job =
   let rec aux start =
-    Current_rpc.Job.log ~start job >>= function
-    | Error _ as e -> Lwt.return e
+    match Current_rpc.Job.log ~start job with
+    | Error _ as e -> e
     | Ok (data, next) ->
-      if data = "" then Lwt_result.return ()
-      else (
+      if data = "" then Ok ()
+      else begin
         output_string stdout data;
         flush stdout;
         aux next
-      )
+      end
   in
   aux 0L
 
 let show_status job =
-  Current_rpc.Job.status job |> Lwt_result.map @@
+  Current_rpc.Job.status job |> Result.map @@
   fun { Current_rpc.Job.id; description; can_cancel; can_rebuild } ->
   Fmt.pr "@[<v2>Job %S:@,\
           Description: @[%a@]@,\
@@ -180,23 +173,37 @@ let show_status job =
     can_rebuild
 
 let cancel job =
-  Current_rpc.Job.cancel job |> Lwt_result.map @@ fun () ->
+  Current_rpc.Job.cancel job |> Result.map @@ fun () ->
   Fmt.pr "Cancelled@."
 
 let approve_start job =
-  Current_rpc.Job.approve_early_start job >>= function
-  | Error _ as e -> Lwt.return e
+  match Current_rpc.Job.approve_early_start job with
+  | Error _ as e -> e
   | Ok () ->
     Fmt.pr "Job approved to start@.";
-    Lwt_result.return ()
+    Ok ()
 
 let rebuild_job job =
   Fmt.pr "Requesting rebuild...@.";
   let new_job = Current_rpc.Job.rebuild job in
-  Capability.when_released new_job (fun () ->
+  Capnp_rpc.Capability.when_released new_job (fun () ->
     Fmt.pr "New job capability released@."
   );
   show_log new_job
+
+(* ===== Command runners ===== *)
+
+let with_engine env cap_file f =
+  Eio.Switch.run @@ fun sw ->
+  let sr = connect ~sw env#net cap_file in
+  Capnp_rpc_unix.with_cap_exn sr f |> to_msg_error
+
+let with_job env cap_file job_id f =
+  with_engine env cap_file @@ fun engine ->
+  let job = Current_rpc.Engine.job engine job_id in
+  Fun.protect
+    ~finally:(fun () -> Capnp_rpc.Capability.dec_ref job)
+    (fun () -> f job)
 
 (* ===== Command-line interface ===== *)
 
@@ -207,22 +214,13 @@ let cap_file =
   Arg.opt Arg.(some Capnp_rpc_unix.sturdy_uri) None @@
   Arg.info ["c"; "cap"] ~doc:"Path to the engine.cap file" ~docv:"CAP"
 
-(* Engine subcommands *)
-
-let jobs_cmd =
+let jobs_cmd env =
   let doc = "List active jobs" in
-  let run cap_file =
-    Lwt_main.run begin
-      connect cap_file >>= fun engine ->
-      Lwt.finalize
-        (fun () -> list_jobs engine)
-        (fun () -> Capability.dec_ref engine; Lwt.return_unit)
-    end |> to_msg_error
-  in
+  let run cap_file = with_engine env cap_file list_jobs in
   let info = Cmd.info "jobs" ~doc in
   Cmd.v info Term.(term_result (const run $ cap_file))
 
-let query_cmd =
+let query_cmd env =
   let doc = "Query job history" in
   let op =
     Arg.value @@
@@ -245,82 +243,43 @@ let query_cmd =
     Arg.info ["prefix"] ~doc:"Filter by job ID prefix (e.g., date)" ~docv:"PREFIX"
   in
   let run cap_file op ok rebuild job_prefix =
-    Lwt_main.run begin
-      connect cap_file >>= fun engine ->
-      Lwt.finalize
-        (fun () -> query_jobs engine ~op ~ok ~rebuild ~job_prefix)
-        (fun () -> Capability.dec_ref engine; Lwt.return_unit)
-    end |> to_msg_error
+    with_engine env cap_file (fun engine ->
+      query_jobs engine ~op ~ok ~rebuild ~job_prefix)
   in
   let info = Cmd.info "query" ~doc in
   Cmd.v info Term.(term_result (const run $ cap_file $ op $ ok $ rebuild $ job_prefix))
 
-let ops_cmd =
+let ops_cmd env =
   let doc = "List operation types" in
-  let run cap_file =
-    Lwt_main.run begin
-      connect cap_file >>= fun engine ->
-      Lwt.finalize
-        (fun () -> list_ops engine)
-        (fun () -> Capability.dec_ref engine; Lwt.return_unit)
-    end |> to_msg_error
-  in
+  let run cap_file = with_engine env cap_file list_ops in
   let info = Cmd.info "ops" ~doc in
   Cmd.v info Term.(term_result (const run $ cap_file))
 
-let stats_cmd =
+let stats_cmd env =
   let doc = "Show pipeline statistics" in
-  let run cap_file =
-    Lwt_main.run begin
-      connect cap_file >>= fun engine ->
-      Lwt.finalize
-        (fun () -> show_stats engine)
-        (fun () -> Capability.dec_ref engine; Lwt.return_unit)
-    end |> to_msg_error
-  in
+  let run cap_file = with_engine env cap_file show_stats in
   let info = Cmd.info "stats" ~doc in
   Cmd.v info Term.(term_result (const run $ cap_file))
 
-let state_cmd =
+let state_cmd env =
   let doc = "Show pipeline state" in
-  let run cap_file =
-    Lwt_main.run begin
-      connect cap_file >>= fun engine ->
-      Lwt.finalize
-        (fun () -> show_state engine)
-        (fun () -> Capability.dec_ref engine; Lwt.return_unit)
-    end |> to_msg_error
-  in
+  let run cap_file = with_engine env cap_file show_state in
   let info = Cmd.info "state" ~doc in
   Cmd.v info Term.(term_result (const run $ cap_file))
 
-let dot_cmd =
+let dot_cmd env =
   let doc = "Output pipeline as DOT graph" in
-  let run cap_file =
-    Lwt_main.run begin
-      connect cap_file >>= fun engine ->
-      Lwt.finalize
-        (fun () -> show_dot engine)
-        (fun () -> Capability.dec_ref engine; Lwt.return_unit)
-    end |> to_msg_error
-  in
+  let run cap_file = with_engine env cap_file show_dot in
   let info = Cmd.info "dot" ~doc in
   Cmd.v info Term.(term_result (const run $ cap_file))
 
-let confirm_get_cmd =
+let confirm_get_cmd env =
   let doc = "Get confirmation level" in
-  let run cap_file =
-    Lwt_main.run begin
-      connect cap_file >>= fun engine ->
-      Lwt.finalize
-        (fun () -> get_confirm_level engine)
-        (fun () -> Capability.dec_ref engine; Lwt.return_unit)
-    end |> to_msg_error
-  in
+  let run cap_file = with_engine env cap_file get_confirm_level in
   let info = Cmd.info "confirm-get" ~doc in
   Cmd.v info Term.(term_result (const run $ cap_file))
 
-let confirm_set_cmd =
+let confirm_set_cmd env =
   let doc = "Set confirmation level" in
   let level_conv =
     let parse s = match String.lowercase_ascii s with
@@ -348,17 +307,12 @@ let confirm_set_cmd =
     Arg.info [] ~doc:"Confirmation level (none, harmless, mostly-harmless, average, above-average, dangerous)" ~docv:"LEVEL"
   in
   let run cap_file level =
-    Lwt_main.run begin
-      connect cap_file >>= fun engine ->
-      Lwt.finalize
-        (fun () -> set_confirm_level engine level)
-        (fun () -> Capability.dec_ref engine; Lwt.return_unit)
-    end |> to_msg_error
+    with_engine env cap_file (fun engine -> set_confirm_level engine level)
   in
   let info = Cmd.info "confirm-set" ~doc in
   Cmd.v info Term.(term_result (const run $ cap_file $ level))
 
-let rebuild_all_cmd =
+let rebuild_all_cmd env =
   let doc = "Rebuild multiple jobs" in
   let job_ids =
     Arg.non_empty @@
@@ -366,67 +320,47 @@ let rebuild_all_cmd =
     Arg.info [] ~doc:"Job IDs to rebuild" ~docv:"JOB_ID"
   in
   let run cap_file job_ids =
-    Lwt_main.run begin
-      connect cap_file >>= fun engine ->
-      Lwt.finalize
-        (fun () -> rebuild_all engine job_ids)
-        (fun () -> Capability.dec_ref engine; Lwt.return_unit)
-    end |> to_msg_error
+    with_engine env cap_file (fun engine -> rebuild_all engine job_ids)
   in
   let info = Cmd.info "rebuild-all" ~doc in
   Cmd.v info Term.(term_result (const run $ cap_file $ job_ids))
-
-(* Job subcommands *)
 
 let job_id =
   Arg.required @@
   Arg.pos 0 Arg.(some string) None @@
   Arg.info [] ~doc:"Job ID" ~docv:"JOB_ID"
 
-let with_job cap_file job_id f =
-  Lwt_main.run begin
-    connect cap_file >>= fun engine ->
-    let job = Current_rpc.Engine.job engine job_id in
-    Lwt.finalize
-      (fun () ->
-        Lwt.finalize (fun () -> f job)
-          (fun () -> Capability.dec_ref job; Lwt.return_unit))
-      (fun () -> Capability.dec_ref engine; Lwt.return_unit)
-  end |> to_msg_error
-
-let job_status_cmd =
+let job_status_cmd env =
   let doc = "Show job status" in
-  let run cap_file job_id = with_job cap_file job_id show_status in
+  let run cap_file job_id = with_job env cap_file job_id show_status in
   let info = Cmd.info "job-status" ~doc in
   Cmd.v info Term.(term_result (const run $ cap_file $ job_id))
 
-let job_log_cmd =
+let job_log_cmd env =
   let doc = "Show job log" in
-  let run cap_file job_id = with_job cap_file job_id show_log in
+  let run cap_file job_id = with_job env cap_file job_id show_log in
   let info = Cmd.info "job-log" ~doc in
   Cmd.v info Term.(term_result (const run $ cap_file $ job_id))
 
-let job_cancel_cmd =
+let job_cancel_cmd env =
   let doc = "Cancel a job" in
-  let run cap_file job_id = with_job cap_file job_id cancel in
+  let run cap_file job_id = with_job env cap_file job_id cancel in
   let info = Cmd.info "job-cancel" ~doc in
   Cmd.v info Term.(term_result (const run $ cap_file $ job_id))
 
-let job_rebuild_cmd =
+let job_rebuild_cmd env =
   let doc = "Rebuild a job" in
-  let run cap_file job_id = with_job cap_file job_id rebuild_job in
+  let run cap_file job_id = with_job env cap_file job_id rebuild_job in
   let info = Cmd.info "job-rebuild" ~doc in
   Cmd.v info Term.(term_result (const run $ cap_file $ job_id))
 
-let job_approve_cmd =
+let job_approve_cmd env =
   let doc = "Approve job to start early" in
-  let run cap_file job_id = with_job cap_file job_id approve_start in
+  let run cap_file job_id = with_job env cap_file job_id approve_start in
   let info = Cmd.info "job-approve" ~doc in
   Cmd.v info Term.(term_result (const run $ cap_file $ job_id))
 
-(* Main command group *)
-
-let main_cmd =
+let main_cmd env =
   let doc = "CLI tool for controlling OCurrent pipelines via RPC" in
   let man = [
     `S Manpage.s_description;
@@ -452,20 +386,22 @@ let main_cmd =
   ] in
   let info = Cmd.info "ocurrent-ctl" ~doc ~man in
   Cmd.group info [
-    jobs_cmd;
-    query_cmd;
-    ops_cmd;
-    stats_cmd;
-    state_cmd;
-    dot_cmd;
-    confirm_get_cmd;
-    confirm_set_cmd;
-    rebuild_all_cmd;
-    job_status_cmd;
-    job_log_cmd;
-    job_cancel_cmd;
-    job_rebuild_cmd;
-    job_approve_cmd;
+    jobs_cmd env;
+    query_cmd env;
+    ops_cmd env;
+    stats_cmd env;
+    state_cmd env;
+    dot_cmd env;
+    confirm_get_cmd env;
+    confirm_set_cmd env;
+    rebuild_all_cmd env;
+    job_status_cmd env;
+    job_log_cmd env;
+    job_cancel_cmd env;
+    job_rebuild_cmd env;
+    job_approve_cmd env;
   ]
 
-let () = exit @@ Cmd.eval main_cmd
+let () =
+  Eio_main.run @@ fun env ->
+  exit @@ Cmd.eval (main_cmd env)

@@ -3,11 +3,12 @@
  (public_name ocurrent-ctl)
  (package current_rpc)
  (libraries
-  capnp-rpc-lwt
+  capnp-rpc
+  capnp-rpc-net
   capnp-rpc-unix
   cmdliner
   current_rpc
+  eio
+  eio_main
   fmt
-  lwt
-  lwt.unix
   prometheus-app.unix))
