@@ -5,7 +5,7 @@
   current.cache
   current_term
   current_incr
+  eio
   fmt
   fpath
-  logs
-  lwt))
+  logs))
