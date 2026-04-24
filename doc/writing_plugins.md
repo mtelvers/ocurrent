@@ -7,9 +7,8 @@ This handles all the details of starting builds, recording the results, managing
 A minimal example looks something like this:
 
 ```ocaml
-# #require "lwt,current,current.cache";;
+# #require "current,current.cache";;
 
-# open Lwt.Infix;;
 # open Current.Syntax;;
 
 # module Frob = struct
@@ -22,9 +21,9 @@ A minimal example looks something like this:
 
     let build No_context job _key =
       (* Wait in a queue or wait for resources here if needed. *)
-      Current.Job.start job ~level:Current.Level.Harmless >>= fun () ->
+      Current.Job.start job ~level:Current.Level.Harmless;
       (* Do the work here. *)
-      Lwt.return @@ Ok "frobbed"
+      Ok "frobbed"
 
     let pp f key = Fmt.pf f "frob %a" Key.pp key
 

@@ -331,7 +331,6 @@ let state_dir = Disk_store.state_dir
 module Db = Db
 module Engine_env = Engine_env
 module Process = Process
-module Switch = Switch
 module Pool = Pool
 module Log_matcher = Log_matcher
 

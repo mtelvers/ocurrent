@@ -64,13 +64,13 @@ val connect :
 (** [connect ~sw ~net cap_uri] connects to an engine using a capability URI. *)
 
 val with_engine :
-  sw:Eio.Switch.t ->
   net:_ Eio.Net.t ->
   Uri.t ->
   (Engine.t -> 'a) ->
   'a
-(** [with_engine ~sw ~net cap_uri f] connects to an engine, runs [f], then
-    releases the capability. *)
+(** [with_engine ~net cap_uri f] connects to an engine, runs [f], then
+    releases the capability. Opens its own switch for the connection's
+    lifetime. *)
 
 (** {2 Cmdliner Integration} *)
 

@@ -75,6 +75,7 @@ run steps in parallel where possible.")
   (ocaml (>= 5.0.0))
   (astring (>= 0.8.5))
   bos
+  (ca-certs (>= 1.0))
   (cmdliner (>= 1.1.0))
   (current_incr (>= 0.6.1))
   (current_term (= :version))

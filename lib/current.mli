@@ -163,41 +163,6 @@ module Engine_env : sig
   val fs : unit -> Eio.Fs.dir_ty Eio.Path.t
 end
 
-(** Like [Lwt_switch], but the cleanup functions are called in sequence, not
-    in parallel. *)
-module Switch : sig
-  type t
-  (** A switch limits the lifetime of an operation.
-      Cleanup operations can be registered against the switch and will
-      be called (in reverse order) when the switch is turned off. *)
-
-  val create : label:string -> unit -> t
-  (** [create ~label ()] is a fresh switch, initially on.
-      @param label If the switch is GC'd while on, this is logged in the error message. *)
-
-  val create_off : unit -> t
-  (** [create_off ()] is a fresh switch, initially (and always) off. *)
-
-  val add_hook_or_exec : t -> (unit -> unit) -> unit
-  (** [add_hook_or_exec switch fn] pushes [fn] on to the stack of functions to call
-      when [t] is turned off. If [t] is already off, calls [fn] immediately.
-      If [t] is in the process of being turned off, waits for that to complete
-      and then runs [fn]. *)
-
-  val turn_off : t -> unit
-  (** [turn_off t] marks the switch as being turned off, then pops and
-      calls clean-up functions in order. When the last one finishes, the switch
-      is marked as off and cannot be used again. If the switch is already off,
-      this does nothing. If the switch is already being turned off, it just
-      waits for that to complete. *)
-
-  val is_on : t -> bool
-  (** [is_on t] is [true] if [turn_off t] hasn't yet been called. *)
-
-  val pp : t Fmt.t
-  (** Prints the state of the switch (for debugging). *)
-end
-
 (** Resource pools, to control how many jobs can use a resource at a time.
     To use a pool within a job, pass the pool to {!Job.start} or call {!Job.use_pool}. *)
 module Pool : sig
@@ -211,11 +176,11 @@ module Pool : sig
 
   val of_fn :
     label : string ->
-    (priority:priority -> switch:Switch.t -> 'a) ->
+    (priority:priority -> sw:Eio.Switch.t -> 'a) ->
     'a t
   (** [of_fn ~label f] is a pool that uses [f] to get a resource.
       The function should suspend the fiber until a resource is available.
-      Return the resource to the pool when [switch] is turned off. *)
+      Return the resource to the pool when [sw] is released. *)
 end
 
 (** Jobs with log files. This is mostly an internal interface - use {!Current_cache} instead. *)
@@ -226,14 +191,18 @@ module Job : sig
 
   val create :
     ?priority:Pool.priority ->
-    switch:Switch.t ->
+    sw:Eio.Switch.t ->
     label:string ->
     config:Config.t ->
     unit -> t
-  (** [create ~switch ~label ~config ()] is a new job.
-      @param switch Turning this off will cancel the job.
+  (** [create ~sw ~label ~config ()] is a new job.
+      @param sw The job runs inside this switch; releasing it ends the job.
       @param priority Passed to the pool when {!start} is called. Default is [`Low].
       @param label A label to use in the job's filename (for debugging). *)
+
+  val switch : t -> Eio.Switch.t
+  (** [switch t] is the Eio switch scoping the job's lifetime. Plugins can
+      attach fibers and resources to it. *)
 
   val start : ?timeout:Duration.t -> ?pool:unit Pool.t -> level:Level.t -> t -> unit
   (** [start t ~level] marks [t] as running. This can only be called once per job.
@@ -306,9 +275,9 @@ module Job : sig
   val register_actions : job_id -> actions -> unit
   (** [register_actions job_id actions] is used to register handlers for e.g. rebuilding jobs. *)
 
-  val use_pool : ?priority:Pool.priority -> switch:Switch.t -> t -> 'a Pool.t -> 'a
-  (** [use_pool ~switch t pool] gets one resource from [pool].
-      The resource is returned to the pool when the switch is turned off.
+  val use_pool : ?priority:Pool.priority -> sw:Eio.Switch.t -> t -> 'a Pool.t -> 'a
+  (** [use_pool ~sw t pool] gets one resource from [pool].
+      The resource is returned to the pool when [sw] is released.
       The operation will be aborted if the job is cancelled. *)
 
   (**/**)

@@ -37,7 +37,7 @@ let webhook ~webhook_secret = object
       let event_str = Option.value ~default:"NONE" event in
       Log.info (fun f -> f "Got GitLab event %a" Fmt.(option ~none:(any "NONE") (quote string)) event);
       Prometheus.Counter.inc_one (Metrics.webhook_events_total event_str);
-      let body = Eio.Buf_read.(of_flow ~max_size:max_int body |> take_all) in
+      let body = Eio.Buf_read.(of_flow ~max_size:(10 * 1024 * 1024) body |> take_all) in
       match validate_webhook webhook_secret headers event_str with
       | Error msg ->
          Log.warn (fun f -> f "%s" msg);

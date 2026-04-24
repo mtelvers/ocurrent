@@ -95,27 +95,30 @@ let with_checkout ?pool ~job commit fn =
   let short_hash = Astring.String.with_range ~len:8 id.Commit_id.hash in
   Current.Job.log job "@[<v2>Checking out commit %s. To reproduce:@,%a@]"
     short_hash Commit_id.pp_user_clone id;
-  let switch = Current.Switch.create ~label:"clone" () in
-  Fun.protect
-    ~finally:(fun () -> Current.Switch.turn_off switch)
-    (fun () ->
-       (match pool with
-        | Some pool -> let () = Current.Job.use_pool ~switch job pool in ()
-        | None -> ());
-       Current.Process.with_tmpdir ~prefix:"git-checkout" @@ fun tmpdir ->
-       let* () = Cmd.cp_r ~cancellable:true ~job ~src:(Fpath.(repo / ".git")) ~dst:tmpdir in
-       let* () = Cmd.git_submodule_deinit ~force:true ~all:true ~cancellable:false ~job ~repo:tmpdir in
-       match Cmd.git_reset_hard ~job ~repo:tmpdir id.Commit_id.hash with
-       | Ok () ->
-         let* () = Cmd.git_submodule_update ~init:true ~cancellable:true ~fetch:false ~job ~repo:tmpdir in
-         Current.Switch.turn_off switch;
-         fn tmpdir
-       | Error e ->
-         match Commit.check_cached ~cancellable:false ~job commit with
-         | Error not_cached ->
-           Fetch_cache.invalidate id;
-           Error not_cached
-         | Ok () -> Error e)
+  Current.Process.with_tmpdir ~prefix:"git-checkout" @@ fun tmpdir ->
+  (* Pool (if any) is held for the clone operations only. Releasing it
+     before [fn tmpdir] runs means other clones can start while [fn] is
+     still working with the checkout. *)
+  let clone_result =
+    Eio.Switch.run @@ fun pool_sw ->
+    (match pool with
+     | Some p -> Current.Job.use_pool ~sw:pool_sw job p
+     | None -> ());
+    let* () = Cmd.cp_r ~cancellable:true ~job ~src:(Fpath.(repo / ".git")) ~dst:tmpdir in
+    let* () = Cmd.git_submodule_deinit ~force:true ~all:true ~cancellable:false ~job ~repo:tmpdir in
+    match Cmd.git_reset_hard ~job ~repo:tmpdir id.Commit_id.hash with
+    | Ok () ->
+      Cmd.git_submodule_update ~init:true ~cancellable:true ~fetch:false ~job ~repo:tmpdir
+    | Error e ->
+      match Commit.check_cached ~cancellable:false ~job commit with
+      | Error not_cached ->
+        Fetch_cache.invalidate id;
+        Error not_cached
+      | Ok () -> Error e
+  in
+  match clone_result with
+  | Ok () -> fn tmpdir
+  | Error _ as e -> e
 
 module Local = struct
   module Ref_map = Map.Make(String)

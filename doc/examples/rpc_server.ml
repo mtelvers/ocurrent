@@ -64,11 +64,11 @@ let man = [
   `S Manpage.s_options;
 ]
 
-let cmd env =
+let cmd eio_env =
   let doc = "A build server that can be controlled via Cap'n Proto RPC" in
   let info = Cmd.info program_name ~doc ~man in
-  Cmd.v info Term.(term_result (const (main env) $ Current.Config.cmdliner $ Current_web.cmdliner $ Capnp_rpc_unix.Vat_config.cmd env $ repo))
+  Cmd.v info Term.(term_result (const (main eio_env) $ Current.Config.cmdliner $ Current_web.cmdliner $ Capnp_rpc_unix.Vat_config.cmd eio_env $ repo))
 
 let () =
-  Eio_main.run @@ fun env ->
-  exit @@ Cmd.eval (cmd env)
+  Eio_main.run @@ fun eio_env ->
+  exit @@ Cmd.eval (cmd eio_env)

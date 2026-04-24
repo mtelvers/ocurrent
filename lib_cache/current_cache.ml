@@ -201,82 +201,85 @@ module Generic(Op : S.GENERIC) = struct
          wait until the job starts before doing this): *)
       t.current <- None;
       let ctx = t.ctx in
-      let switch = Current.Switch.create ~label:Op.id () in
       let priority = if latched = None then `High else `Low in
-      let job = Job.create ~priority ~switch ~label:Op.id ~config () in
-      let job_id = Job.id job in
-      t.job_id <- Some job_id;
-      let op = { value = t.desired; job; autocancelled = false } in
-      let ready = !Job.timestamp () |> Unix.gmtime in
-      t.op <- `Active (op, latched);
-      let pp_op f = pp_op f (t.key, op.value) in
-      Job.log job "New job: %t" pp_op;
-      Eio.Fiber.fork ~sw:(Current.Engine_env.get_sw ()) (fun () ->
-        let _ = Eio.Promise.await (Job.start_time job) in
-        Eio.Fiber.yield ();        (* Ensure we're outside any propagate *)
-        notify t
-      );
       let key_digest = Op.Key.digest t.key in
-      Hashtbl.add key_of_job_id job_id (Op.id, key_digest);
-      Hashtbl.add job_id_of_key (Op.id, key_digest) job_id;
+      let job_id_ref = ref None in
       Eio.Fiber.fork ~sw:(Current.Engine_env.get_sw ()) (fun () ->
         Fun.protect
           (fun () ->
-             let outcome =
-               try Op.run ctx job t.key (Value.value op.value)
-               with ex -> Error (`Msg (Printexc.to_string ex))
-             in
-             Eio.Fiber.yield ();        (* Ensure we're outside any propagate *)
-             let end_time = Unix.gmtime @@ !Job.timestamp () in
-             if op.autocancelled then (
-               t.op <- `Retry latched;
-               invalidate t
-             ) else (
-               (* Record the result *)
-               let running =
-                 match Eio.Promise.peek (Job.start_time job) with
-                 | Some x -> Some (Unix.gmtime x)
-                 | None when Stdlib.Result.is_ok outcome -> Fmt.failwith "Job.start not called!";
-                 | None -> None
-               in
-               let outcome =
-                 match Current.Job.cancelled_state op.job, outcome with
-                 | Error (`Msg msg), _ ->
-                   Job.log job "%s" msg;
-                   Error (`Msg "Cancelled")
-                 | Ok (), Ok _ -> Job.log job "Job succeeded"; outcome
-                 | Ok (), Error (`Msg m) ->
-                   Job.log job "Job failed: %s" m;
-                   match Current.Log_matcher.analyse_job job with
-                   | None -> outcome
-                   | Some e -> Error (`Msg e)
-               in
-               t.mtime <- !Job.timestamp ();
+             Eio.Switch.run (fun job_sw ->
+               let job = Job.create ~priority ~sw:job_sw ~label:Op.id ~config () in
                let job_id = Job.id job in
-               Db.record ~op:Op.id ~job_id
-                 ~key:key_digest
-                 ~value:(Value.digest op.value)
-                 ~ready ~running ~finished:end_time
-                 ~build:t.build_number
-                 (Stdlib.Result.map Op.Outcome.marshal outcome);
-               t.build_number <- Int64.succ t.build_number;
-               match outcome with
-               | Ok outcome ->
-                 t.current <- Some (Value.digest op.value);
-                 t.op <- `Finished (Ok outcome);
-               | Error e ->
-                 if Value.equal op.value t.desired then (
-                   t.op <- `Finished (Error e)
-                 ) else (
-                   (* It failed, but we have a new value to set: ignore the stale error. *)
-                   t.op <- `Retry None;
-                   invalidate t
-                 )
-             ))
+               job_id_ref := Some job_id;
+               t.job_id <- Some job_id;
+               let op = { value = t.desired; job; autocancelled = false } in
+               let ready = !Job.timestamp () |> Unix.gmtime in
+               t.op <- `Active (op, latched);
+               let pp_op f = pp_op f (t.key, op.value) in
+               Job.log job "New job: %t" pp_op;
+               Eio.Fiber.fork ~sw:(Current.Engine_env.get_sw ()) (fun () ->
+                 let _ = Eio.Promise.await (Job.start_time job) in
+                 Eio.Fiber.yield ();        (* Ensure we're outside any propagate *)
+                 notify t
+               );
+               Hashtbl.add key_of_job_id job_id (Op.id, key_digest);
+               Hashtbl.add job_id_of_key (Op.id, key_digest) job_id;
+               let outcome =
+                 try Op.run ctx job t.key (Value.value op.value)
+                 with ex -> Error (`Msg (Printexc.to_string ex))
+               in
+               Eio.Fiber.yield ();        (* Ensure we're outside any propagate *)
+               let end_time = Unix.gmtime @@ !Job.timestamp () in
+               if op.autocancelled then (
+                 t.op <- `Retry latched;
+                 invalidate t
+               ) else (
+                 (* Record the result *)
+                 let running =
+                   match Eio.Promise.peek (Job.start_time job) with
+                   | Some x -> Some (Unix.gmtime x)
+                   | None when Stdlib.Result.is_ok outcome -> Fmt.failwith "Job.start not called!";
+                   | None -> None
+                 in
+                 let outcome =
+                   match Current.Job.cancelled_state op.job, outcome with
+                   | Error (`Msg msg), _ ->
+                     Job.log job "%s" msg;
+                     Error (`Msg "Cancelled")
+                   | Ok (), Ok _ -> Job.log job "Job succeeded"; outcome
+                   | Ok (), Error (`Msg m) ->
+                     Job.log job "Job failed: %s" m;
+                     match Current.Log_matcher.analyse_job job with
+                     | None -> outcome
+                     | Some e -> Error (`Msg e)
+                 in
+                 t.mtime <- !Job.timestamp ();
+                 Db.record ~op:Op.id ~job_id
+                   ~key:key_digest
+                   ~value:(Value.digest op.value)
+                   ~ready ~running ~finished:end_time
+                   ~build:t.build_number
+                   (Stdlib.Result.map Op.Outcome.marshal outcome);
+                 t.build_number <- Int64.succ t.build_number;
+                 match outcome with
+                 | Ok outcome ->
+                   t.current <- Some (Value.digest op.value);
+                   t.op <- `Finished (Ok outcome);
+                 | Error e ->
+                   if Value.equal op.value t.desired then (
+                     t.op <- `Finished (Error e)
+                   ) else (
+                     (* It failed, but we have a new value to set: ignore the stale error. *)
+                     t.op <- `Retry None;
+                     invalidate t
+                   )
+               )))
           ~finally:(fun () ->
-             Hashtbl.remove key_of_job_id (Job.id job);
-             Hashtbl.remove job_id_of_key (Op.id, key_digest);
-             Current.Switch.turn_off switch;
+             (match !job_id_ref with
+              | Some job_id ->
+                Hashtbl.remove key_of_job_id job_id;
+                Hashtbl.remove job_id_of_key (Op.id, key_digest)
+              | None -> ());
              (* While we were working, we might have decided we wanted something else.
                 If so, start that now. *)
              if t.ref_count > 0 then maybe_restart ~config t

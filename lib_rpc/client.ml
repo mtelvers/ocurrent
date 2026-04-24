@@ -306,7 +306,8 @@ let connect ~sw ~net cap_uri =
   let sr = Capnp_rpc_unix.Vat.import_exn vat cap_uri in
   Sturdy_ref.connect_exn sr
 
-let with_engine ~sw ~net cap_uri f =
+let with_engine ~net cap_uri f =
+  Eio.Switch.run @@ fun sw ->
   let engine = connect ~sw ~net cap_uri in
   Fun.protect
     ~finally:(fun () -> Capability.dec_ref engine)
@@ -317,12 +318,12 @@ let with_engine ~sw ~net cap_uri f =
 module Cmdliner = struct
   open Cmdliner
 
-  (* Run an operation inside Eio_main.run, with a switch and net cap. *)
+  (* Run an operation inside Eio_main.run, with a net cap. [with_engine]
+     opens its own switch for the connection's lifetime. *)
   let run_op cap_uri f =
     Eio_main.run @@ fun env ->
-    Eio.Switch.run @@ fun sw ->
     let net = Eio.Stdenv.net env in
-    match with_engine ~sw ~net cap_uri f with
+    match with_engine ~net cap_uri f with
     | Ok () -> `Ok ()
     | Error `Capnp e -> `Error (false, Fmt.str "%a" Capnp_rpc.Error.pp e)
 

@@ -44,7 +44,7 @@ let webhook ~engine ~get_job_ids ~webhook_secret = object
     let event_str  = Option.value ~default:"NONE" event in
     Log.info (fun f -> f "Got GitHub event %S" event_str);
     Prometheus.Counter.inc_one (Metrics.webhook_events_total event_str);
-    let body = Eio.Buf_read.(of_flow ~max_size:max_int body |> take_all) in
+    let body = Eio.Buf_read.(of_flow ~max_size:(10 * 1024 * 1024) body |> take_all) in
     let json_body = Yojson.Safe.from_string body in
     match validate_webhook_payload webhook_secret body headers event_str with
     | Error msg ->

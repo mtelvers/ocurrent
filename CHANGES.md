@@ -1,10 +1,12 @@
-### v0.7.4 (2026-03-26)
+### v0.7.4 (unreleased)
 
 Other:
 
 - Add base64 dependency to current\_git (@mtelvers, #467)
 - Add lower bound for base64 >= 3.1.0 (@mtelvers, #468)
 - Add unified RPC client module with cmdliner integration (@mtelvers, #469)
+- Add missing test dependencies to current\_rpc (@mtelvers, #470)
+- Cap capnp-rpc dependencies at < 2.0 (@mtelvers, #471)
 
 ### v0.7.3 (2026-01-05)
 

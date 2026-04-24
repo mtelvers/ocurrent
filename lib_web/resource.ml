@@ -39,7 +39,7 @@ class virtual t = object (self : #Site.raw_resource)
         match Multipart_form.Content_type.of_string (content_type ^ "\r\n") with
         | Error (`Msg e) -> Context.respond_error ctx `Bad_request e
         | Ok ({ty = `Multipart; subty = `Iana_token "form-data"; _} as content_type) ->
-          let body_str = Eio.Buf_read.(of_flow ~max_size:max_int body |> take_all) in
+          let body_str = Eio.Buf_read.(of_flow ~max_size:(10 * 1024 * 1024) body |> take_all) in
           begin match Multipart_form.of_string_to_tree body_str content_type with
             | Error (`Msg e) -> Context.respond_error ctx `Bad_request e
             | Ok tree ->
@@ -55,7 +55,7 @@ class virtual t = object (self : #Site.raw_resource)
               end
           end
         | Ok _ ->
-          let body = Eio.Buf_read.(of_flow ~max_size:max_int body |> take_all) in
+          let body = Eio.Buf_read.(of_flow ~max_size:(10 * 1024 * 1024) body |> take_all) in
           let data = Uri.query_of_encoded body in
           match List.assoc_opt "csrf" data |> Option.value ~default:[] with
           | [got] when got = Context.csrf ctx ->
@@ -80,7 +80,7 @@ let logout = object
     let ctx = Context.of_request ~site request in
     if ctx.user = None then render_logged_out ctx
     else (
-      let body = Eio.Buf_read.(of_flow ~max_size:max_int body |> take_all) in
+      let body = Eio.Buf_read.(of_flow ~max_size:(10 * 1024 * 1024) body |> take_all) in
       let data = Uri.query_of_encoded body in
       match List.assoc_opt "csrf" data |> Option.value ~default:[] with
       | [got] when got = Context.csrf ctx ->

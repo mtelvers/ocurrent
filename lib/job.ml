@@ -17,7 +17,7 @@ let sleep : (float -> unit) ref =
   ref (fun d -> Eio.Time.sleep (Engine_env.clock ()) d)
 
 type t = {
-  switch : Switch.t;
+  switch : Eio.Switch.t;
   config : Config.t;
   id : string;
   priority : Pool.priority;
@@ -103,8 +103,7 @@ let cancel t reason =
      | ex ->
        Fmt.failwith "Uncaught exception from cancel hook for %S: %a" (id t) Fmt.exn ex)
 
-let create ?(priority=`Low) ~switch ~label ~config () =
-  if not (Switch.is_on switch) then Fmt.failwith "Switch %a is not on! (%s)" Switch.pp switch label;
+let create ?(priority=`Low) ~sw ~label ~config () =
   let jobs_dir = Lazy.force jobs_dir in
   let time = !timestamp () |> Unix.gmtime in
   let date =
@@ -127,11 +126,11 @@ let create ?(priority=`Low) ~switch ~label ~config () =
     let log_mutex = Eio.Mutex.create () in
     let explicit_confirm, set_explicit_confirm = Eio.Promise.create () in
     let cancel_hooks = `Hooks (Lwt_dllist.create ()) in
-    let t = { switch; id; path = Some path; start_time; set_start_time; config; log_cond; log_mutex; cancel_hooks;
+    let t = { switch = sw; id; path = Some path; start_time; set_start_time; config; log_cond; log_mutex; cancel_hooks;
               explicit_confirm; set_explicit_confirm; waiting_for_confirmation = false; priority } in
     jobs := Map.add id t !jobs;
     Prometheus.Gauge.inc_one Metrics.active_jobs;
-    Switch.add_hook_or_fail switch (fun () ->
+    Eio.Switch.on_release sw (fun () ->
         begin match t.cancel_hooks with
           | `Hooks hooks ->
             let reason = "Job complete" in
@@ -147,6 +146,8 @@ let create ?(priority=`Low) ~switch ~label ~config () =
     t
 
 let pp_id = Fmt.string
+
+let switch t = t.switch
 
 let is_running t = Eio.Promise.is_resolved t.start_time
 
@@ -166,14 +167,14 @@ let with_handler t ~on_cancel fn =
     let node = Lwt_dllist.add_r on_cancel hooks in
     Fun.protect fn ~finally:(fun () -> Lwt_dllist.remove node)
 
-let use_pool ?(priority=`Low) ~switch t pool =
+let use_pool ?(priority=`Low) ~sw t pool =
   let register_cancel cancel =
     on_cancel t (fun _ -> cancel ())
   in
-  Pool.get ~priority ~switch ~register_cancel pool ()
+  Pool.get ~priority ~sw ~register_cancel pool ()
 
 let no_pool =
-  Pool.of_fn ~label:"no pool" (fun ~priority:_ ~switch:_ -> ())
+  Pool.of_fn ~label:"no pool" (fun ~priority:_ ~sw:_ -> ())
 
 let confirm t ~pool level =
   (match t.config.Config.confirm with
@@ -192,7 +193,7 @@ let confirm t ~pool level =
              Eio.Promise.await t.explicit_confirm;
              log t "Explicit approval received for this job"))
    | _ -> ());
-  let res = use_pool t ~priority:t.priority ~switch:t.switch pool in
+  let res = use_pool t ~priority:t.priority ~sw:t.switch pool in
   log t "Got resource from pool %a" Pool.pp pool;
   res
 
@@ -210,7 +211,10 @@ let start_with ?timeout ~pool ~level t =
   );
   Eio.Promise.resolve t.set_start_time (!timestamp ());
   timeout |> Option.iter (fun duration ->
-    Eio.Fiber.fork ~sw:(Engine_env.get_sw ()) (fun () ->
+    (* Fork on the job's switch so the timer is cancelled cleanly when the
+       job ends. Eio's switch cancellation unwinds through [!sleep] and the
+       fiber exits silently via the fork's error handler. *)
+    Eio.Fiber.fork ~sw:t.switch (fun () ->
       !sleep (Duration.to_f duration);
       match t.cancel_hooks with
       | `Cancelled _ -> ()

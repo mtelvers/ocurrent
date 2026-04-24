@@ -80,17 +80,14 @@ let copy_to_log ~job src =
   loop ()
 
 let add_shutdown_hooks ~cancellable ~job ~cmd proc =
-  let terminate () =
-    try Eio.Process.signal proc Sys.sigterm
-    with _ -> ()
-  in
+  (* For cancellable=false we don't need any hook: the process is spawned
+     on [exec]'s own [Eio.Switch.run] scope, so Eio cancellation propagates
+     naturally if the caller is cancelled. *)
   if cancellable then
     Job.on_cancel job (fun reason ->
       Log.info (fun f -> f "Cancelling %a (%s)" pp_cmd cmd reason);
-      terminate ())
-  else
-    (* Always terminate process if the job ends: *)
-    Switch.add_hook_or_exec job.Job.switch terminate
+      try Eio.Process.signal proc Sys.sigterm
+      with _ -> ())
 
 let exec ?cwd ?(stdin="") ?(pp_cmd = pp_cmd) ?pp_error_command ?env ~cancellable ~job cmd =
   let pp_error_command = Option.value pp_error_command ~default:(pp_command pp_cmd cmd) in
@@ -167,7 +164,9 @@ let check_output ?cwd ?(stdin="") ?(pp_cmd = pp_cmd) ?pp_error_command ~cancella
          stdin_result := Error (`Msg (Printexc.to_string ex));
          (try Eio.Flow.close stdin_w with _ -> ())));
     (fun () ->
-      stdout := Eio.Buf_read.(of_flow ~max_size:max_int stdout_r |> take_all));
+      (* 100 MiB is enough for all realistic check_output use; prevents
+         unbounded memory growth if a subprocess goes mad. *)
+      stdout := Eio.Buf_read.(of_flow ~max_size:(100 * 1024 * 1024) stdout_r |> take_all));
     (fun () -> copy_to_log ~job stderr_r);
   ];
   let status = Eio.Process.await proc in

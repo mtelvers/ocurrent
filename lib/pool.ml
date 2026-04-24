@@ -32,7 +32,7 @@ type priority = [ `High | `Low ]
 
 type 'a t = {
   name : string;
-  get : priority:priority -> switch:Switch.t -> register_cancel:((unit -> unit) -> unit) -> 'a;
+  get : priority:priority -> sw:Eio.Switch.t -> register_cancel:((unit -> unit) -> unit) -> 'a;
 }
 
 module Local = struct
@@ -56,7 +56,7 @@ module Local = struct
       Eio.Promise.resolve waiter `Use
     )
 
-  let get t ~priority ~switch ~register_cancel =
+  let get t ~priority ~sw ~register_cancel =
     let ready, set_ready = Eio.Promise.create () in
     let queue =
       match priority with
@@ -72,11 +72,12 @@ module Local = struct
     check t;
     let start_wait = Unix.gettimeofday () in
     Prometheus.Gauge.inc_one (Metrics.qlen t.label);
-    Switch.add_hook_or_exec switch cancel;
     register_cancel cancel;
     let result =
       try Eio.Promise.await ready
       with exn ->
+        (* The awaiting fiber was cancelled by Eio (usually because [sw]
+           is being torn down). Remove ourselves from the queue. *)
         cancel ();
         raise exn
     in
@@ -87,7 +88,7 @@ module Local = struct
       let stop_wait = Unix.gettimeofday () in
       Prometheus.Summary.observe (Metrics.wait_time t.label) (stop_wait -. start_wait);
       Prometheus.Gauge.inc_one (Metrics.resources_in_use t.label);
-      Switch.add_hook_or_fail switch (fun () ->
+      Eio.Switch.on_release sw (fun () ->
         assert (t.used > 0);
         Prometheus.Gauge.dec_one (Metrics.resources_in_use t.label);
         t.used <- t.used - 1;
@@ -103,17 +104,17 @@ module Local = struct
       queue_high = Lwt_dllist.create ()
     } in
     { name = label;
-      get = fun ~priority ~switch ~register_cancel -> get t ~priority ~switch ~register_cancel }
+      get = fun ~priority ~sw ~register_cancel -> get t ~priority ~sw ~register_cancel }
 end
 
 let create = Local.create
 
 let of_fn ~label get =
   { name = label;
-    get = fun ~priority ~switch ~register_cancel:_ -> get ~priority ~switch }
+    get = fun ~priority ~sw ~register_cancel:_ -> get ~priority ~sw }
 
-let get t ~priority ~switch ?(register_cancel=ignore) () =
-  t.get ~priority ~switch ~register_cancel
+let get t ~priority ~sw ?(register_cancel=ignore) () =
+  t.get ~priority ~sw ~register_cancel
 
 let pp f t =
   Fmt.string f t.name

@@ -32,7 +32,7 @@ let render_svg ctx a =
       Eio.Flow.copy_string dotfile stdin_w;
       Eio.Flow.close stdin_w)
     (fun () ->
-      svg := Eio.Buf_read.(of_flow ~max_size:max_int stdout_r |> take_all));
+      svg := Eio.Buf_read.(of_flow ~max_size:(100 * 1024 * 1024) stdout_r |> take_all));
   match Eio.Process.await proc with
   | `Exited 0 -> Ok !svg
   | `Exited i -> Fmt.error_msg "dot failed (exit status %d) - is graphviz installed?" i
