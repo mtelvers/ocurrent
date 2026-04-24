@@ -32,7 +32,7 @@ type priority = [ `High | `Low ]
 
 type 'a t = {
   name : string;
-  get : priority:priority -> switch:Switch.t -> 'a;
+  get : priority:priority -> switch:Switch.t -> register_cancel:((unit -> unit) -> unit) -> 'a;
 }
 
 module Local = struct
@@ -56,7 +56,7 @@ module Local = struct
       Eio.Promise.resolve waiter `Use
     )
 
-  let get t ~priority ~switch =
+  let get t ~priority ~switch ~register_cancel =
     let ready, set_ready = Eio.Promise.create () in
     let queue =
       match priority with
@@ -73,6 +73,7 @@ module Local = struct
     let start_wait = Unix.gettimeofday () in
     Prometheus.Gauge.inc_one (Metrics.qlen t.label);
     Switch.add_hook_or_exec switch cancel;
+    register_cancel cancel;
     let result =
       try Eio.Promise.await ready
       with exn ->
@@ -101,14 +102,18 @@ module Local = struct
       queue_low = Lwt_dllist.create ();
       queue_high = Lwt_dllist.create ()
     } in
-    { name = label; get = get t }
+    { name = label;
+      get = fun ~priority ~switch ~register_cancel -> get t ~priority ~switch ~register_cancel }
 end
 
 let create = Local.create
 
-let of_fn ~label get = { name = label; get }
+let of_fn ~label get =
+  { name = label;
+    get = fun ~priority ~switch ~register_cancel:_ -> get ~priority ~switch }
 
-let get t = t.get
+let get t ~priority ~switch ?(register_cancel=ignore) () =
+  t.get ~priority ~switch ~register_cancel
 
 let pp f t =
   Fmt.string f t.name

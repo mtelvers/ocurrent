@@ -1,5 +1,3 @@
-open Lwt.Infix
-
 module Job = Current.Job
 
 let read path =
@@ -9,70 +7,78 @@ let read path =
   data
 
 let ( >>!= ) x f =
-  x >>= function
+  match x with
   | Ok y -> f y
   | Error `Msg m -> failwith m
 
-let streams _switch () =
+let with_engine_env env fn =
+  Eio.Switch.run (fun sw ->
+    Current.Engine_env.init ~sw ~env;
+    fn ())
+
+let streams env =
+  with_engine_env env @@ fun () ->
   Job.timestamp := (fun () -> 0.0);
   let switch = Current.Switch.create ~label:"streams" () in
   let config = Current.Config.v () in
   let job = Job.create ~switch ~label:"streams" ~config () in
-  let log_data = Job.wait_for_log_data job in
-  assert (Lwt.state log_data = Lwt.Sleep);
-  let cmd = ("", [| "sh"; "-c"; "echo out1; echo >&2 out2; echo out3" |]) in
+  let cmd = ["sh"; "-c"; "echo out1; echo >&2 out2; echo out3"] in
   Current.Process.exec ~cancellable:true ~job cmd >>!= fun () ->
-  Current.Switch.turn_off switch >>= fun () ->
-  assert (Lwt.state log_data != Lwt.Sleep);
+  Current.Switch.turn_off switch;
   let path = Job.log_path (Job.id job) |> Stdlib.Result.get_ok in
   Alcotest.(check string) "Combined results" "1970-01-01 00:00.00: Exec: \"sh\" \"-c\" \"echo out1; echo >&2 out2; echo out3\"\n\
-                                              out1\nout2\nout3\n" (read path);
-  Lwt.return_unit
+                                              out1\nout2\nout3\n" (read path)
 
-let output _switch () =
+let output env =
+  with_engine_env env @@ fun () ->
   Job.timestamp := (fun () -> 0.0);
   let switch = Current.Switch.create ~label:"output" () in
   let config = Current.Config.v () in
   let job = Job.create ~switch ~label:"output" ~config () in
-  let cmd = ("", [| "sh"; "-c"; "echo out1; echo >&2 out2; echo out3" |]) in
+  let cmd = ["sh"; "-c"; "echo out1; echo >&2 out2; echo out3"] in
   Current.Process.check_output ~cancellable:true ~job cmd >>!= fun out ->
-  Current.Switch.turn_off switch >>= fun () ->
+  Current.Switch.turn_off switch;
   Alcotest.(check string) "Output" "out1\nout3\n" out;
   let path = Job.log_path (Job.id job) |> Stdlib.Result.get_ok in
   Alcotest.(check string) "Log" "1970-01-01 00:00.00: Exec: \"sh\" \"-c\" \"echo out1; echo >&2 out2; echo out3\"\n\
-                                 out2\n" (read path);
-  Lwt.return_unit
+                                 out2\n" (read path)
 
-let pp_cmd ppf (v, args) =
-  let remove_token s = 
+let pp_cmd ppf args =
+  let remove_token s =
     match Astring.String.cut ~sep:":" s with
     | Some ("token", _secret) -> "token:<TOKEN>"
     | _ -> s
   in
-  Current.Process.pp_cmd ppf (v, Array.map remove_token args)
+  Current.Process.pp_cmd ppf (List.map remove_token args)
 
-let pp_command _switch () =
+let pp_command env =
+  with_engine_env env @@ fun () ->
   Job.timestamp := (fun () -> 0.0);
   let switch = Current.Switch.create ~label:"command" () in
   let config = Current.Config.v () in
   let job = Job.create ~switch ~label:"output" ~config () in
-  let cmd = ("", [| "echo"; "token:abcdefgh" |]) in
+  let cmd = ["echo"; "token:abcdefgh"] in
   Current.Process.check_output ~pp_cmd ~cancellable:true ~job cmd >>!= fun out ->
-  Current.Switch.turn_off switch >>= fun () ->
+  Current.Switch.turn_off switch;
   Alcotest.(check string) "Output" "token:abcdefgh\n" out;
   let path = Job.log_path (Job.id job) |> Stdlib.Result.get_ok in
-  Alcotest.(check string) "Log" "1970-01-01 00:00.00: Exec: \"echo\" \"token:<TOKEN>\"\n" (read path);
-  Lwt.return_unit
+  Alcotest.(check string) "Log" "1970-01-01 00:00.00: Exec: \"echo\" \"token:<TOKEN>\"\n" (read path)
 
-let cancel _switch () =
+let cancel env =
+  with_engine_env env @@ fun () ->
   Job.timestamp := (fun () -> 0.0);
   let switch = Current.Switch.create ~label:"cancel" () in
   let config = Current.Config.v () in
   let job = Job.create ~switch ~label:"output" ~config () in
-  let cmd = ("", [| "sleep"; "120" |]) in
-  let thread = Current.Process.exec ~cancellable:true ~job cmd in
-  Current.Job.cancel job "Timeout";
-  thread >>= fun res ->
+  let cmd = ["sleep"; "120"] in
+  let res =
+    Eio.Fiber.first
+      (fun () ->
+        Eio.Fiber.yield ();
+        Current.Job.cancel job "Timeout";
+        Eio.Fiber.await_cancel ())
+      (fun () -> Current.Process.exec ~cancellable:true ~job cmd)
+  in
   begin match res with
     | Ok () -> Alcotest.fail "Should have failed!"
     | Error `Msg m when Astring.String.is_prefix ~affix:"Command \"sleep\" \"120\" failed with signal" m -> ()
@@ -80,47 +86,72 @@ let cancel _switch () =
   end;
   let path = Job.log_path (Job.id job) |> Stdlib.Result.get_ok in
   Alcotest.(check string) "Log" "1970-01-01 00:00.00: Exec: \"sleep\" \"120\"\n\
-                                 1970-01-01 00:00.00: Cancelling: Timeout\n" (read path);
-  Lwt.return_unit
+                                 1970-01-01 00:00.00: Cancelling: Timeout\n" (read path)
 
-let pp_lwt_state f = function
-  | Lwt.Sleep -> Fmt.string f "Sleep"
-  | Lwt.Return () -> Fmt.string f "Returned"
-  | Lwt.Fail ex -> Fmt.exn f ex
+(* For checking pool semantics we need to observe whether [Job.start] has
+   unblocked. Fork it onto a switch and track the outcome in a [Promise]. *)
+type start_state =
+  | Pending
+  | Returned
+  | Failed of exn
 
-let lwt_state = Alcotest.testable pp_lwt_state (=)
+let pp_start_state f = function
+  | Pending -> Fmt.string f "Pending"
+  | Returned -> Fmt.string f "Returned"
+  | Failed ex -> Fmt.exn f ex
 
-let pool _switch () =
+let start_state_t = Alcotest.testable pp_start_state (=)
+
+let observe p =
+  if Eio.Promise.is_resolved p then Eio.Promise.await p
+  else Pending
+
+let fork_start ~sw ?pool ~level job =
+  let p, u = Eio.Promise.create () in
+  Eio.Fiber.fork ~sw (fun () ->
+    match Job.start ?pool ~level job with
+    | () -> Eio.Promise.resolve u Returned
+    | exception ex -> Eio.Promise.resolve u (Failed ex));
+  p
+
+let pool env =
+  with_engine_env env @@ fun () ->
+  Eio.Switch.run @@ fun sw ->
   let config = Current.Config.v () in
   let pool = Current.Pool.create ~label:"test" 1 in
   let sw1 = Current.Switch.create ~label:"cancel-1" () in
   let sw2 = Current.Switch.create ~label:"cancel-2" () in
   let job1 = Job.create ~switch:sw1 ~label:"job-1" ~config () in
   let job2 = Job.create ~switch:sw2 ~label:"job-2" ~config () in
-  let s1 = Job.start ~pool ~level:Current.Level.Harmless job1 in
-  let s2 = Job.start ~pool ~level:Current.Level.Harmless job2 in
-  Lwt.pause () >>= fun () ->
-  Alcotest.(check lwt_state) "First job started" Lwt.(Return ()) (Lwt.state s1);
-  Alcotest.(check lwt_state) "Second job queued" Lwt.Sleep (Lwt.state s2);
-  Current.Switch.turn_off sw1 >>= fun () ->
-  Lwt.pause () >>= fun () ->
-  Alcotest.(check lwt_state) "Second job ready" Lwt.(Return ()) (Lwt.state s2);
+  let s1 = fork_start ~sw ~pool ~level:Current.Level.Harmless job1 in
+  let s2 = fork_start ~sw ~pool ~level:Current.Level.Harmless job2 in
+  Eio.Fiber.yield ();
+  Alcotest.check start_state_t "First job started" Returned (observe s1);
+  Alcotest.check start_state_t "Second job queued" Pending (observe s2);
+  Current.Switch.turn_off sw1;
+  Eio.Fiber.yield ();
+  Alcotest.check start_state_t "Second job ready" Returned (observe s2);
   Current.Switch.turn_off sw2
 
-let pool_cancel _switch () =
+let pool_cancel env =
+  with_engine_env env @@ fun () ->
+  Eio.Switch.run @@ fun sw ->
   let config = Current.Config.v () in
   let pool = Current.Pool.create ~label:"test" 0 in
   let sw1 = Current.Switch.create ~label:"cancel-1" () in
   let job1 = Job.create ~switch:sw1 ~label:"job-1" ~config () in
-  let s1 = Job.start ~pool ~level:Current.Level.Harmless job1 in
-  Alcotest.(check lwt_state) "Job queued" Lwt.Sleep (Lwt.state s1);
+  let s1 = fork_start ~sw ~pool ~level:Current.Level.Harmless job1 in
+  Alcotest.check start_state_t "Job queued" Pending (observe s1);
   Current.Job.cancel job1 "Cancel";
-  Lwt.pause () >>= fun () ->
+  Eio.Fiber.yield ();
   Job.log job1 "Continuing job for a bit";
-  Alcotest.(check lwt_state) "Job cancelled" (Lwt.Fail (Failure "Cancelled waiting for resource from pool \"test\"")) (Lwt.state s1);
-  Lwt.return_unit
+  Alcotest.check start_state_t "Job cancelled"
+    (Failed (Failure "Cancelled waiting for resource from pool \"test\""))
+    (observe s1)
 
-let pool_priority _switch () =
+let pool_priority env =
+  with_engine_env env @@ fun () ->
+  Eio.Switch.run @@ fun sw ->
   let config = Current.Config.v () in
   let pool = Current.Pool.create ~label:"test" 1 in
   let sw1 = Current.Switch.create ~label:"cancel-1" () in
@@ -129,29 +160,28 @@ let pool_priority _switch () =
   let job1 = Job.create ~switch:sw1 ~label:"job-1" ~config () in
   let job2 = Job.create ~switch:sw2 ~label:"job-2" ~config () in
   let job3 = Job.create ~priority:`High ~switch:sw3 ~label:"job-3" ~config () in
-  let s1 = Job.start ~pool ~level:Current.Level.Harmless job1 in
-  let s2 = Job.start ~pool ~level:Current.Level.Harmless job2 in
-  let s3 = Job.start ~pool ~level:Current.Level.Harmless job3 in
-  Lwt.pause () >>= fun () ->
-  Alcotest.(check lwt_state) "First job started" Lwt.(Return ()) (Lwt.state s1);
-  Alcotest.(check lwt_state) "Second job queued" Lwt.Sleep (Lwt.state s2);
-  Alcotest.(check lwt_state) "Third job queued" Lwt.Sleep (Lwt.state s3);
-  Current.Switch.turn_off sw1 >>= fun () ->
-  Lwt.pause () >>= fun () ->
-  Alcotest.(check lwt_state) "Second job queued" Lwt.Sleep (Lwt.state s2);
-  Alcotest.(check lwt_state) "High-priority third job ready" Lwt.(Return ()) (Lwt.state s3);
-  Current.Switch.turn_off sw3 >>= fun () ->
-  Lwt.pause () >>= fun () ->
-  Alcotest.(check lwt_state) "Second job ready" Lwt.(Return ()) (Lwt.state s2);
-  Lwt.return_unit
+  let s1 = fork_start ~sw ~pool ~level:Current.Level.Harmless job1 in
+  let s2 = fork_start ~sw ~pool ~level:Current.Level.Harmless job2 in
+  let s3 = fork_start ~sw ~pool ~level:Current.Level.Harmless job3 in
+  Eio.Fiber.yield ();
+  Alcotest.check start_state_t "First job started" Returned (observe s1);
+  Alcotest.check start_state_t "Second job queued" Pending (observe s2);
+  Alcotest.check start_state_t "Third job queued" Pending (observe s3);
+  Current.Switch.turn_off sw1;
+  Eio.Fiber.yield ();
+  Alcotest.check start_state_t "Second job queued" Pending (observe s2);
+  Alcotest.check start_state_t "High-priority third job ready" Returned (observe s3);
+  Current.Switch.turn_off sw3;
+  Eio.Fiber.yield ();
+  Alcotest.check start_state_t "Second job ready" Returned (observe s2)
 
-let tests =
+let tests env =
   [
-    Driver.test_case_gc "streams" streams;
-    Driver.test_case_gc "output" output;
-    Driver.test_case_gc "pp_cmd" pp_command;
-    Driver.test_case_gc "cancel" cancel;
-    Driver.test_case_gc "pool" pool;
-    Driver.test_case_gc "pool_cancel" pool_cancel;
-    Driver.test_case_gc "pool_priority" pool_priority;
+    Driver.test_case_gc env "streams" streams;
+    Driver.test_case_gc env "output" output;
+    Driver.test_case_gc env "pp_cmd" pp_command;
+    Driver.test_case_gc env "cancel" cancel;
+    Driver.test_case_gc env "pool" pool;
+    Driver.test_case_gc env "pool_cancel" pool_cancel;
+    Driver.test_case_gc env "pool_priority" pool_priority;
   ]

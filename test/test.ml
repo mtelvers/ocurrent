@@ -15,8 +15,8 @@ let engine_result =
   Alcotest.testable (Current_term.Output.pp Fmt.(const string "()")) (Current_term.Output.equal (=))
 
 let observe_result fmt =
-  Alcotest.testable 
-    (Current_term.Output.Blockable.pp fmt) 
+  Alcotest.testable
+    (Current_term.Output.Blockable.pp fmt)
     (Current_term.Output.Blockable.equal (=))
 
 let analyse ~lint src =
@@ -45,14 +45,14 @@ let with_commit v () =
 let v1 commit =
   commit |> fetch |> build |> test
 
-let test_v1 _switch () =
-  Driver.test ~name:"v1" (with_commit v1) @@ function
+let test_v1 env =
+  Driver.test env ~name:"v1" (with_commit v1) @@ function
   | 1 -> Git.complete_clone test_commit
   | 2 -> Docker.complete "image-src-123" ~cmd:["make"; "test"] @@ Ok ()
   | _ -> raise Exit
 
-let test_v1_cancel _switch () =
-  Driver.test ~name:"v1c" (with_commit v1) @@ function
+let test_v1_cancel env =
+  Driver.test env ~name:"v1c" (with_commit v1) @@ function
   | 1 -> Git.complete_clone test_commit
   | 2 -> Driver.cancel "docker run \"image-src-123\" \"make\" \"test\" (in-progress)"
   | _ -> raise Exit
@@ -65,9 +65,9 @@ let v2 commit =
   let bin = build src in
   bin |> Current.gate ~on:(test bin) |> push ~tag:"foo/bar"
 
-let test_v2 _switch () =
+let test_v2 env =
   let config = Current.Config.v ~confirm:Current.Level.Dangerous () in
-  Driver.test ~config ~name:"v2" (with_commit v2) @@ function
+  Driver.test env ~config ~name:"v2" (with_commit v2) @@ function
   | 1 -> Git.complete_clone test_commit
   | 2 -> Docker.complete "image-src-123" ~cmd:["make"; "test"] @@ Ok ()
   | 3 -> Current.Config.set_confirm config None
@@ -87,7 +87,7 @@ let v3 commit =
   in
   Current.all @@ List.map gated_deploy binaries
 
-let test_v3 _switch () =
+let test_v3 env =
   let final_stats =
     { Current_term.S.
       ok = 8;
@@ -98,7 +98,7 @@ let test_v3 _switch () =
       blocked = 3;
     }
   in
-  Driver.test ~name:"v3" (with_commit v3) ~final_stats @@ function
+  Driver.test env ~name:"v3" (with_commit v3) ~final_stats @@ function
   | 1 -> Git.complete_clone test_commit
   | 2 ->
     Docker.complete "lin-image-src-123" ~cmd:["make"; "test"] @@ Ok ();
@@ -117,8 +117,8 @@ let v4 commit =
   if Fpath.to_string src = "src-123" then build (Current.return src) |> test
   else Current.fail "Wrong hash!"
 
-let test_v4 _switch () =
-  Driver.test ~name:"v4" (with_commit v4) @@ function
+let test_v4 env =
+  Driver.test env ~name:"v4" (with_commit v4) @@ function
   | 1 -> Git.complete_clone test_commit
   | 2 -> Docker.complete "image-src-123" ~cmd:["make"; "test"] @@ Error (`Msg "Failed")
   | _ -> raise Exit
@@ -136,7 +136,7 @@ let v5 commit =
   |> Current.gate ~on:ok
   |> Current.list_iter (module Git.Commit) (fun s -> s |> fetch |> build |> test)
 
-let test_v5 _switch () =
+let test_v5 env =
   let final_stats =
     { Current_term.S.
       ok = 7;
@@ -147,12 +147,12 @@ let test_v5 _switch () =
       blocked = 4;
     }
   in
-  Driver.test ~name:"v5" ~final_stats (with_commit v5) @@ function
+  Driver.test env ~name:"v5" ~final_stats (with_commit v5) @@ function
   | 1 -> Git.complete_clone test_commit
   | 2 -> Docker.complete "image-src-123" ~cmd:["make"; "test"] @@ Ok ()
   | _ -> raise Exit
 
-let test_v5_nil _switch () =
+let test_v5_nil env =
   let final_stats =
     { Current_term.S.
       ok = 7;
@@ -164,7 +164,7 @@ let test_v5_nil _switch () =
     }
   in
   let test_commit = Git.Commit.v ~repo:"my/project" ~hash:"456" in
-  Driver.test ~name:"v5n" ~final_stats (with_commit v5) @@ function
+  Driver.test env ~name:"v5n" ~final_stats (with_commit v5) @@ function
   | 1 -> Git.complete_clone test_commit
   | 2 -> Docker.complete "image-src-456" ~cmd:["make"; "test"] @@ Ok ()
   | _ -> raise Exit
@@ -175,7 +175,7 @@ let test_option ~case commit =
   |> Current.option_map (fun linter -> lint src ~linter)
   |> Current.ignore_value
 
-let test_option_some _switch () =
+let test_option_some env =
   let final_stats =
     { Current_term.S.
       ok = 6;
@@ -188,11 +188,11 @@ let test_option_some _switch () =
   in
   test_option ~case:(Some "ocamlformat")
   |> with_commit
-  |> (fun c -> Driver.test ~final_stats ~name:"option-some" c @@ function
+  |> (fun c -> Driver.test env ~final_stats ~name:"option-some" c @@ function
   | 1 -> Git.complete_clone test_commit
   | _ -> raise Exit)
 
-let test_option_none _switch () =
+let test_option_none env =
   let final_stats =
     { Current_term.S.
       ok = 5;
@@ -205,22 +205,22 @@ let test_option_none _switch () =
   in
   test_option ~case:None
   |> with_commit
-  |> (fun c -> Driver.test ~final_stats ~name:"option-none" c @@ function
+  |> (fun c -> Driver.test env ~final_stats ~name:"option-none" c @@ function
     | 1 -> Git.complete_clone test_commit
     | _ -> raise Exit)
 
 (* This is just to check the diagram when the state box is hidden. *)
-let test_state _switch () =
+let test_state env =
   let pipeline () =
     Current.component "set-status" |>
     let** value = Current.state ~hidden:true (Current.active `Ready) in
     Alcotest.(check engine_result) "Pending" (Error (`Active `Ready)) value;
     Current.return ()
   in
-  Driver.test ~name:"state" pipeline @@ function
+  Driver.test env ~name:"state" pipeline @@ function
   | _ -> raise Exit
 
-let test_pair _switch () =
+let test_pair env =
   let show label x = (* Make it show up on the diagram so we can see the input state. *)
     Current.component "%s" label |>
     let> () = x in
@@ -240,7 +240,7 @@ let test_pair _switch () =
       check "Blocked-3" (Error (`Active `Running)) (Current.all [pending; ok]);
     ]
   in
-  Driver.test ~name:"pair" pipeline (fun _ -> raise Exit)
+  Driver.test env ~name:"pair" pipeline (fun _ -> raise Exit)
     ~final_stats:
     { Current_term.S.
       ok = 2;
@@ -252,7 +252,7 @@ let test_pair _switch () =
     }
 
 (* This is just to check the diagram. *)
-let test_context _switch () =
+let test_context env =
   let label l =
     Current.component "%s" l |>
     let> () = Current.return () in
@@ -265,7 +265,7 @@ let test_context _switch () =
     Current.with_context b @@ fun () ->
     label "c"
   in
-  Driver.test ~name:"context" pipeline @@ function
+  Driver.test env ~name:"context" pipeline @@ function
   | _ -> raise Exit
 
 let test_with base src =
@@ -279,8 +279,8 @@ let latch commit =
   let src = fetch commit in
   test_with base src
 
-let test_latch _switch () =
-  Driver.test ~name:"latch" (with_commit latch) @@ function
+let test_latch env =
+  Driver.test env ~name:"latch" (with_commit latch) @@ function
   | 1 ->
     (* The "docker pull" box is orange as the image isn't available yet *)
     Git.complete_clone test_commit;
@@ -333,7 +333,7 @@ let test_metadata () =
   let job_id = Current_incr.observe (Term.Executor.run pipeline) in
   Alcotest.(check (result (option string) reject)) "Got job ID" (Ok (Some "1")) job_id
 
-let test_observe _switch () =
+let test_observe env =
   let ok = Current.return "a" in
   let failure = Current.fail "oh no" in
   let active = Current.active `Running in
@@ -344,49 +344,48 @@ let test_observe _switch () =
   let pipeline () =
     let+ _ = ok
     and+ _ = failure
-    and+ _ = active 
+    and+ _ = active
     and+ _ = blocked
     in
     ()
   in
-  Driver.test ~name:"observe" pipeline @@ function
+  Driver.test env ~name:"observe" pipeline @@ function
   | _ ->
     let observe_result = observe_result Fmt.string in
     Alcotest.(check observe_result) "OK" (Ok "a") (Current.observe ok);
-    Alcotest.(check observe_result) 
+    Alcotest.(check observe_result)
       "Failure" (Error (`Msg "oh no")) (Current.observe failure);
-    Alcotest.(check observe_result) 
+    Alcotest.(check observe_result)
       "Active" (Error (`Active `Running)) (Current.observe active);
-    Alcotest.(check observe_result) 
+    Alcotest.(check observe_result)
       "Blocked" (Error (`Blocked)) (Current.observe blocked);
     raise Exit
 
 let () =
-  Lwt_main.run begin
-    Alcotest_lwt.run "test" [
-      "pipelines", [
-        Driver.test_case_gc "v1"          test_v1;
-        Driver.test_case_gc "v1-cancel"   test_v1_cancel;
-        Driver.test_case_gc "v2"          test_v2;
-        Driver.test_case_gc "v3"          test_v3;
-        Driver.test_case_gc "v4"          test_v4;
-        Driver.test_case_gc "v5"          test_v5;
-        Driver.test_case_gc "v5-nil"      test_v5_nil;
-        Driver.test_case_gc "option-some" test_option_some;
-        Driver.test_case_gc "option-none" test_option_none;
-        Driver.test_case_gc "state"       test_state;
-        Driver.test_case_gc "pair"        test_pair;
-        Driver.test_case_gc "latch"       test_latch;
-        Driver.test_case_gc "context"     test_context;
-      ];
-      "terms", [
-        Alcotest_lwt.test_case_sync "all_labelled" `Quick test_all_labelled;
-        Alcotest_lwt.test_case_sync "metadata"     `Quick test_metadata;
-        Driver.test_case_gc         "observe"             test_observe;
-      ];
-      "cache", Test_cache.tests;
-      "monitor", Test_monitor.tests;
-      "job", Test_job.tests;
-      "log_matcher", Test_log_matcher.tests;
-    ]
-  end
+  Eio_main.run @@ fun env ->
+  Alcotest.run "test" [
+    "pipelines", [
+      Driver.test_case_gc env "v1"          test_v1;
+      Driver.test_case_gc env "v1-cancel"   test_v1_cancel;
+      Driver.test_case_gc env "v2"          test_v2;
+      Driver.test_case_gc env "v3"          test_v3;
+      Driver.test_case_gc env "v4"          test_v4;
+      Driver.test_case_gc env "v5"          test_v5;
+      Driver.test_case_gc env "v5-nil"      test_v5_nil;
+      Driver.test_case_gc env "option-some" test_option_some;
+      Driver.test_case_gc env "option-none" test_option_none;
+      Driver.test_case_gc env "state"       test_state;
+      Driver.test_case_gc env "pair"        test_pair;
+      Driver.test_case_gc env "latch"       test_latch;
+      Driver.test_case_gc env "context"     test_context;
+    ];
+    "terms", [
+      Alcotest.test_case "all_labelled" `Quick test_all_labelled;
+      Alcotest.test_case "metadata"     `Quick test_metadata;
+      Driver.test_case_gc env "observe" test_observe;
+    ];
+    "cache", Test_cache.tests env;
+    "monitor", Test_monitor.tests env;
+    "job", Test_job.tests env;
+    "log_matcher", Test_log_matcher.tests;
+  ]

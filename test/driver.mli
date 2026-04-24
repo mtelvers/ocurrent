@@ -1,13 +1,14 @@
 val init_logging : unit -> unit
 
 val test :
+  Eio_unix.Stdenv.base ->
   ?config:Current.Config.t ->
   ?final_stats:Current_term.S.stats ->
   name:string ->
   (unit -> unit Current.t) ->
   (int -> unit) ->
-  unit Lwt.t
-(** [test ~name pipeline actions] runs [pipeline]. After each iteration,
+  unit
+(** [test env ~name pipeline actions] runs [pipeline]. After each iteration,
     it calls [actions i] where [i] is the number of the next step ([1] on the
     first call). If [actions i] raises [Exit] then the tests finish. *)
 
@@ -17,4 +18,8 @@ val cancel : string -> unit
 val rebuild : string -> unit
 (** [rebuild msg] triggers a rebuild of the job named [msg]. *)
 
-val test_case_gc : string -> (Lwt_switch.t -> unit -> unit Lwt.t) -> unit Alcotest_lwt.test_case
+val test_case_gc :
+  Eio_unix.Stdenv.base ->
+  string ->
+  (Eio_unix.Stdenv.base -> unit) ->
+  unit Alcotest.test_case

@@ -166,8 +166,11 @@ let with_handler t ~on_cancel fn =
     let node = Lwt_dllist.add_r on_cancel hooks in
     Fun.protect fn ~finally:(fun () -> Lwt_dllist.remove node)
 
-let use_pool ?(priority=`Low) ~switch _t pool =
-  Pool.get ~priority ~switch pool
+let use_pool ?(priority=`Low) ~switch t pool =
+  let register_cancel cancel =
+    on_cancel t (fun _ -> cancel ())
+  in
+  Pool.get ~priority ~switch ~register_cancel pool ()
 
 let no_pool =
   Pool.of_fn ~label:"no pool" (fun ~priority:_ ~switch:_ -> ())

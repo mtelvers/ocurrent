@@ -297,7 +297,9 @@ module Generic(Op : S.GENERIC) = struct
                    if remaining_time > 0.0 then !Job.sleep remaining_time;
                    `Fired)
                 (fun () -> Eio.Promise.await cancel_p; `Cancelled)
-            with ex ->
+            with
+            | Eio.Cancel.Cancelled _ -> `Cancelled
+            | ex ->
               Log.err (fun f -> f "Expiry thread failed: %a" Fmt.exn ex);
               `Cancelled
           in

@@ -3,7 +3,6 @@
  (modules test test_monitor test_cache test_job test_log_matcher driver)
  (libraries
   alcotest
-  alcotest-lwt
   astring
   bos
   current
@@ -15,12 +14,12 @@
   current_git_test
   current_opam_test
   duration
+  eio
+  eio_main
   fmt
   fmt.tty
   fpath
   logs.fmt
-  lwt
-  lwt.unix
   result
   prometheus
   prometheus-app

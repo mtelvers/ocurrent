@@ -1,4 +1,3 @@
-open Lwt.Infix
 open Current.Syntax
 
 let () =
@@ -72,7 +71,7 @@ let stats =
 (* Write two SVG files for pipeline [v]: one containing the static analysis
    before it has been run, and another once a particular commit hash has been
    supplied to it. *)
-let test ?config ?final_stats ~name v actions =
+let test env ?config ?final_stats ~name v actions =
   Git.reset ();
   Docker.reset ();
   SVar.set selected (Ok v);
@@ -95,12 +94,11 @@ let test ?config ?final_stats ~name v actions =
     let { Current.Engine.value = x; _} = step_result in
     Logs.info (fun f -> f "--> %a" (Current_term.Output.pp (Fmt.any "()")) x);
     begin
-      if Lwt.state next <> Lwt.Sleep then Fmt.failwith "Already ready, and nothing changed yet!";
+      if Eio.Promise.is_resolved next then Fmt.failwith "Already ready, and nothing changed yet!";
       try actions !step with
       | Exit ->
         final_stats |> Option.iter (fun expected ->
             Alcotest.check stats "Check final stats" expected @@ Current.Analysis.quick_stat ();
-            (* Alcotest.check stats "Check final stats" expected @@ Current.Analysis.stats test_pipeline *)
           );
         SVar.set selected (Error (`Msg "test-over"));
         step := -1
@@ -109,41 +107,49 @@ let test ?config ?final_stats ~name v actions =
     let rec wait i =
       match i with
       | 0 -> failwith "No inputs ready (tests stuck)!"
-      | i when Lwt.state next = Lwt.Sleep ->
-        Lwt.pause () >>= fun () ->
+      | i when not (Eio.Promise.is_resolved next) ->
+        Eio.Fiber.yield ();
         wait (i - 1)
-      | _ -> Lwt.return_unit
+      | _ -> ()
     in
-    wait 3      (* Wait a few turns for things to become ready *)
+    wait 20
   in
-  let engine = Current.Engine.create ?config ~trace (fun () -> test_pipeline) in
-  Lwt.catch
-    (fun () -> Current.Engine.thread engine)
-    (function
-      | Exit -> Docker.assert_finished (); Lwt.return_unit
-      | ex -> Lwt.reraise ex
-    )
+  try
+    Eio.Switch.run (fun sw ->
+      Current.Engine_env.init ~sw ~env;
+      let _engine : Current.Engine.t =
+        Current.Engine.create ?config ~trace (fun () -> test_pipeline)
+      in
+      (* The engine runs as a daemon and keeps going until [trace] raises
+         [Exit]; block here so the switch stays open until that happens. *)
+      Eio.Fiber.await_cancel ())
+  with Exit -> Docker.assert_finished ()
 
-let test_case_gc name fn =
-  Alcotest_lwt.test_case name `Quick (fun switch () ->
-      let old_errors = Logs.err_count () in
-      fn switch () >>= fun () ->
+let test_case_gc env name fn =
+  Alcotest.test_case name `Quick (fun () ->
+    let old_errors = Logs.err_count () in
+    (* Hold a switch open for the whole test: Driver.test opens its own
+       nested switch for the engine's lifetime, but between tests, and for
+       the post-test cleanup propagate, we need a live switch so that
+       primitives torn down by previous pipelines can stop cleanly. *)
+    Eio.Switch.run (fun sw ->
+      Current.Engine_env.init ~sw ~env;
+      fn env;
+      Current.Engine_env.init ~sw ~env;
       SVar.set selected (Error (`Msg "no-test"));
-      Current_incr.propagate ();
-      Lwt.pause () >>= fun () ->
-      Gc.full_major ();
-      Alcotest.(check int) "No errors logged" 0 @@ Logs.err_count () - old_errors;
-      Prometheus.CollectorRegistry.(collect default) >|= fun data ->
-      Fmt.to_to_string Prometheus_app.TextFormat_0_0_4.output data
-      |> String.split_on_char '\n'
-      |> List.iter (fun line ->
-          if Astring.String.is_prefix ~affix:"ocurrent_cache_memory_cache_items{" line then (
-            match Astring.String.cut ~sep:"} " line with
-            | None -> Fmt.failwith "Bad metrics line: %S" line
-            | Some (key, _) when Astring.String.is_infix ~affix:"_total{" key -> ()
-            | Some (key, value) ->
-              if float_of_string value <> 0.0 then
-                Fmt.failwith "Non-zero metric after test: %s=%s" key value
-          )
-        );
-    )
+      Current_incr.propagate ());
+    Gc.full_major ();
+    Alcotest.(check int) "No errors logged" 0 @@ Logs.err_count () - old_errors;
+    let data = Prometheus.CollectorRegistry.(collect default) in
+    Fmt.to_to_string Prometheus_app.TextFormat_0_0_4.output data
+    |> String.split_on_char '\n'
+    |> List.iter (fun line ->
+        if Astring.String.is_prefix ~affix:"ocurrent_cache_memory_cache_items{" line then (
+          match Astring.String.cut ~sep:"} " line with
+          | None -> Fmt.failwith "Bad metrics line: %S" line
+          | Some (key, _) when Astring.String.is_infix ~affix:"_total{" key -> ()
+          | Some (key, value) ->
+            if float_of_string value <> 0.0 then
+              Fmt.failwith "Non-zero metric after test: %s=%s" key value
+        )
+      ))
