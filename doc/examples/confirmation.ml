@@ -8,7 +8,6 @@
     and check the state at [http://localhost:8080]. You can click on the show
     node and click the button to run the step. *)
 
-open Lwt.Infix
 open Current.Syntax
 
 module Git = Current_git
@@ -25,9 +24,9 @@ module Show = struct
 
     let build No_context job key =
         (* We specify this job as [Dangerous] so the confirmation will be hold. *)
-        Current.Job.start job ~level:Current.Level.Dangerous >>= fun () ->
-            Current.Job.log job "You are using this commit %s" key;
-            Lwt.return @@ Ok ()
+        Current.Job.start job ~level:Current.Level.Dangerous;
+        Current.Job.log job "You are using this commit %s" key;
+        Ok ()
 
     let pp = Key.pp
     let auto_cancel = true
@@ -55,15 +54,13 @@ let pipeline ~repo () =
 let main mode repo =
     (* Here, we set the config to request a confirmation above job with [Average] value. *)
     let config = Current.Config.v ~confirm:Current.Level.Average () in
-    Lwt_main.run begin
-        let repo = Git.Local.v (Fpath.v repo) in
-        let engine = Current.Engine.create ~config (pipeline ~repo) in
-        let site = Current_web.Site.(v ~has_role:allow_all) ~name:program_name (Current_web.routes engine) in
-        Lwt.choose [
-            Current.Engine.thread engine;
-            Current_web.run ~mode site
-        ]
-    end
+    Eio_main.run @@ fun env ->
+    Eio.Switch.run @@ fun sw ->
+    Current.Engine_env.init ~sw ~env;
+    let repo = Git.Local.v (Fpath.v repo) in
+    let engine = Current.Engine.create ~config (pipeline ~repo) in
+    let site = Current_web.Site.(v ~has_role:allow_all) ~name:program_name (Current_web.routes engine) in
+    Current_web.run ~mode site
 
 open Cmdliner
 

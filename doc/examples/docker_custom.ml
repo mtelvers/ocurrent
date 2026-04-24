@@ -17,8 +17,6 @@ let () = Prometheus_unix.Logging.init ()
 module Test = struct
   module Raw = Current_docker.Raw
 
-  open Lwt.Infix
-
   let id = "docker-custom-test"         (* A unique ID for the results database *)
 
   type t = No_context
@@ -49,11 +47,11 @@ module Test = struct
   let test_command = ["curl"; "-Ss"; "--fail"; "http://localhost/"]
 
   let build No_context job { Key.docker_context; image } =
-    Current.Job.start job ~level:Current.Level.Mostly_harmless >>= fun () ->
+    Current.Job.start job ~level:Current.Level.Mostly_harmless;
     (* Start the container running: *)
     Raw.Cmd.with_container ~docker_context ~job ~kill_on_cancel:true (run image ~docker_context) @@ fun id ->
     Current.Job.log job "Waiting 1 second to let HTTP server start...";
-    Lwt_unix.sleep 1.0 >>= fun () ->
+    Eio.Time.sleep (Eio.Stdenv.clock (Current.Engine_env.get_env ())) 1.0;
     (* Test the container's service: *)
     Current.Process.exec ~cancellable:true ~job (exec id test_command ~docker_context)
 
@@ -87,14 +85,12 @@ let pipeline () =
   test (Docker.build ~pull:false ~dockerfile `No_context)
 
 let main config mode =
+  Eio_main.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  Current.Engine_env.init ~sw ~env;
   let engine = Current.Engine.create ~config pipeline in
   let site = Current_web.Site.(v ~has_role:allow_all) ~name:program_name (Current_web.routes engine) in
-  Lwt_main.run begin
-    Lwt.choose [
-      Current.Engine.thread engine;
-      Current_web.run ~mode site;
-    ]
-  end
+  Current_web.run ~mode site
 
 (* Command-line parsing *)
 

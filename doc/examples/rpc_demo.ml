@@ -6,8 +6,6 @@
      dune exec -- rpc_demo
 *)
 
-open Lwt.Infix
-
 (* Create a minimal mock implementation for demonstration.
    Note: not constrained here so internal functions are accessible;
    signature is verified when passed to functor. *)
@@ -32,7 +30,7 @@ module Demo_current = struct
       else Error (`Msg ("Unknown job: " ^ job_id))
 
     let lookup_running job_id = Map.find_opt job_id !jobs
-    let wait_for_log_data _ = Lwt.return_unit
+    let wait_for_log_data _ = ()
     let approve_early_start _ = ()
     let cancel job _ = job.cancelled <- true
     let cancelled_state job = if job.cancelled then Error (`Msg "Cancelled") else Ok ()
@@ -148,6 +146,11 @@ let pp_time ppf t =
 
 let () = Prometheus_unix.Logging.init ~default_level:Logs.Warning ()
 
+let show_error k =
+  match k with
+  | Error `Capnp e -> Fmt.pr "Error: %a@." Capnp_rpc.Error.pp e; None
+  | Ok v -> Some v
+
 let run () =
   (* Setup demo data *)
   let _ = Demo_current.Job.add_job "docker-build-abc123" in
@@ -162,130 +165,100 @@ let run () =
 
   (* 1. Active Jobs *)
   Fmt.pr "--- Active Jobs ---@.";
-  Current_rpc.Engine.active_jobs service >>= (function
-    | Error `Capnp e -> Fmt.pr "Error: %a@." Capnp_rpc.Error.pp e; Lwt.return_unit
-    | Ok jobs ->
-      List.iter (fun j -> Fmt.pr "  %s@." j) jobs;
-      Lwt.return_unit) >>= fun () ->
+  Current_rpc.Engine.active_jobs service |> show_error |> Option.iter (fun jobs ->
+    List.iter (fun j -> Fmt.pr "  %s@." j) jobs);
   Fmt.pr "@.";
 
   (* 2. Pipeline Stats *)
   Fmt.pr "--- Pipeline Statistics ---@.";
-  Current_rpc.Engine.pipeline_stats service >>= (function
-    | Error `Capnp e -> Fmt.pr "Error: %a@." Capnp_rpc.Error.pp e; Lwt.return_unit
-    | Ok stats ->
-      Fmt.pr "  OK:                       %d@." stats.ok;
-      Fmt.pr "  Waiting for confirmation: %d@." stats.waiting_for_confirmation;
-      Fmt.pr "  Ready:                    %d@." stats.ready;
-      Fmt.pr "  Running:                  %d@." stats.running;
-      Fmt.pr "  Failed:                   %d@." stats.failed;
-      Fmt.pr "  Blocked:                  %d@." stats.blocked;
-      Lwt.return_unit) >>= fun () ->
+  Current_rpc.Engine.pipeline_stats service |> show_error |> Option.iter (fun (stats : Current_rpc.Engine.stats) ->
+    Fmt.pr "  OK:                       %d@." stats.ok;
+    Fmt.pr "  Waiting for confirmation: %d@." stats.waiting_for_confirmation;
+    Fmt.pr "  Ready:                    %d@." stats.ready;
+    Fmt.pr "  Running:                  %d@." stats.running;
+    Fmt.pr "  Failed:                   %d@." stats.failed;
+    Fmt.pr "  Blocked:                  %d@." stats.blocked);
   Fmt.pr "@.";
 
   (* 3. Pipeline State *)
   Fmt.pr "--- Pipeline State ---@.";
-  Current_rpc.Engine.pipeline_state service >>= (function
-    | Error `Capnp e -> Fmt.pr "Error: %a@." Capnp_rpc.Error.pp e; Lwt.return_unit
-    | Ok state ->
-      let s = match state with
-        | Current_rpc.Engine.Success -> "SUCCESS"
-        | Current_rpc.Engine.Failed msg -> "FAILED: " ^ msg
-        | Current_rpc.Engine.Active `Ready -> "ACTIVE (ready)"
-        | Current_rpc.Engine.Active `Running -> "ACTIVE (running)"
-        | Current_rpc.Engine.Active `Waiting_for_confirmation -> "ACTIVE (waiting)"
-      in
-      Fmt.pr "  State: %s@." s;
-      Lwt.return_unit) >>= fun () ->
+  Current_rpc.Engine.pipeline_state service |> show_error |> Option.iter (fun state ->
+    let s = match state with
+      | Current_rpc.Engine.Success -> "SUCCESS"
+      | Current_rpc.Engine.Failed msg -> "FAILED: " ^ msg
+      | Current_rpc.Engine.Active `Ready -> "ACTIVE (ready)"
+      | Current_rpc.Engine.Active `Running -> "ACTIVE (running)"
+      | Current_rpc.Engine.Active `Waiting_for_confirmation -> "ACTIVE (waiting)"
+    in
+    Fmt.pr "  State: %s@." s);
   Fmt.pr "@.";
 
   (* 4. Operation Types *)
   Fmt.pr "--- Operation Types ---@.";
-  Current_rpc.Engine.ops service >>= (function
-    | Error `Capnp e -> Fmt.pr "Error: %a@." Capnp_rpc.Error.pp e; Lwt.return_unit
-    | Ok ops ->
-      List.iter (fun op -> Fmt.pr "  %s@." op) ops;
-      Lwt.return_unit) >>= fun () ->
+  Current_rpc.Engine.ops service |> show_error |> Option.iter (fun ops ->
+    List.iter (fun op -> Fmt.pr "  %s@." op) ops);
   Fmt.pr "@.";
 
   (* 5. Job History Query *)
   Fmt.pr "--- Job History (all) ---@.";
   let params = { Current_rpc.Engine.op = None; ok = None; rebuild = None; job_prefix = None } in
-  Current_rpc.Engine.query service params >>= (function
-    | Error `Capnp e -> Fmt.pr "Error: %a@." Capnp_rpc.Error.pp e; Lwt.return_unit
-    | Ok entries ->
-      entries |> List.iter (fun (e : Current_rpc.Engine.history_entry) ->
-        let outcome = match e.outcome with Ok v -> "OK: " ^ v | Error msg -> "FAILED: " ^ msg in
-        Fmt.pr "  %s (build #%Ld)@." e.job_id e.build;
-        Fmt.pr "    %s@." outcome;
-        Fmt.pr "    finished: %a@." pp_time e.finished);
-      Lwt.return_unit) >>= fun () ->
+  Current_rpc.Engine.query service params |> show_error |> Option.iter (fun entries ->
+    entries |> List.iter (fun (e : Current_rpc.Engine.history_entry) ->
+      let outcome = match e.outcome with Ok v -> "OK: " ^ v | Error msg -> "FAILED: " ^ msg in
+      Fmt.pr "  %s (build #%Ld)@." e.job_id e.build;
+      Fmt.pr "    %s@." outcome;
+      Fmt.pr "    finished: %a@." pp_time e.finished));
   Fmt.pr "@.";
 
   (* 6. Job History Query (filtered) *)
   Fmt.pr "--- Job History (docker- prefix only) ---@.";
   let params = { Current_rpc.Engine.op = None; ok = None; rebuild = None; job_prefix = Some "docker-" } in
-  Current_rpc.Engine.query service params >>= (function
-    | Error `Capnp e -> Fmt.pr "Error: %a@." Capnp_rpc.Error.pp e; Lwt.return_unit
-    | Ok entries ->
-      Fmt.pr "  Found %d entries@." (List.length entries);
-      Lwt.return_unit) >>= fun () ->
+  Current_rpc.Engine.query service params |> show_error |> Option.iter (fun entries ->
+    Fmt.pr "  Found %d entries@." (List.length entries));
   Fmt.pr "@.";
 
   (* 7. Confirmation Level *)
   Fmt.pr "--- Confirmation Level ---@.";
-  Current_rpc.Engine.get_confirm_level service >>= (function
-    | Error `Capnp e -> Fmt.pr "Error: %a@." Capnp_rpc.Error.pp e; Lwt.return_unit
-    | Ok level ->
-      let s = match level with
-        | None -> "disabled"
-        | Some Current_rpc.Engine.Harmless -> "harmless"
-        | Some Current_rpc.Engine.Mostly_harmless -> "mostly-harmless"
-        | Some Current_rpc.Engine.Average -> "average"
-        | Some Current_rpc.Engine.Above_average -> "above-average"
-        | Some Current_rpc.Engine.Dangerous -> "dangerous"
-      in
-      Fmt.pr "  Current level: %s@." s;
-      Lwt.return_unit) >>= fun () ->
+  Current_rpc.Engine.get_confirm_level service |> show_error |> Option.iter (fun level ->
+    let s = match level with
+      | None -> "disabled"
+      | Some Current_rpc.Engine.Harmless -> "harmless"
+      | Some Current_rpc.Engine.Mostly_harmless -> "mostly-harmless"
+      | Some Current_rpc.Engine.Average -> "average"
+      | Some Current_rpc.Engine.Above_average -> "above-average"
+      | Some Current_rpc.Engine.Dangerous -> "dangerous"
+    in
+    Fmt.pr "  Current level: %s@." s);
 
   Fmt.pr "  Setting level to 'dangerous'...@.";
-  Current_rpc.Engine.set_confirm_level service (Some Current_rpc.Engine.Dangerous) >>= (function
-    | Error `Capnp e -> Fmt.pr "Error: %a@." Capnp_rpc.Error.pp e; Lwt.return_unit
-    | Ok () -> Fmt.pr "  Done.@."; Lwt.return_unit) >>= fun () ->
+  Current_rpc.Engine.set_confirm_level service (Some Current_rpc.Engine.Dangerous) |> show_error |> Option.iter (fun () ->
+    Fmt.pr "  Done.@.");
   Fmt.pr "@.";
 
   (* 8. Pipeline DOT Graph *)
   Fmt.pr "--- Pipeline DOT Graph ---@.";
-  Current_rpc.Engine.pipeline_dot service >>= (function
-    | Error `Capnp e -> Fmt.pr "Error: %a@." Capnp_rpc.Error.pp e; Lwt.return_unit
-    | Ok dot ->
-      Fmt.pr "%s@." dot;
-      Lwt.return_unit) >>= fun () ->
+  Current_rpc.Engine.pipeline_dot service |> show_error |> Option.iter (fun dot ->
+    Fmt.pr "%s@." dot);
 
   (* 9. Job Log *)
   Fmt.pr "--- Job Log (first job) ---@.";
   let job = Current_rpc.Engine.job service "docker-build-abc123" in
-  Current_rpc.Job.log ~start:0L job >>= (function
-    | Error `Capnp e -> Fmt.pr "Error: %a@." Capnp_rpc.Error.pp e; Lwt.return_unit
-    | Ok (data, _next) ->
-      Fmt.pr "%s@." data;
-      Lwt.return_unit) >>= fun () ->
-  Capnp_rpc_lwt.Capability.dec_ref job;
+  Current_rpc.Job.log ~start:0L job |> show_error |> Option.iter (fun (data, _next) ->
+    Fmt.pr "%s@." data);
+  Capnp_rpc.Capability.dec_ref job;
 
   (* 10. Rebuild All *)
   Fmt.pr "--- Rebuild All ---@.";
   Current_rpc.Engine.rebuild_all service
     ["docker-build-abc123"; "git-fetch-def456"; "nonexistent"]
-  >>= (function
-    | Error `Capnp e -> Fmt.pr "Error: %a@." Capnp_rpc.Error.pp e; Lwt.return_unit
-    | Ok result ->
-      Fmt.pr "  Succeeded: %s@." (String.concat ", " result.succeeded);
-      Fmt.pr "  Failed: %s@." (String.concat ", " result.failed);
-      Lwt.return_unit) >>= fun () ->
+  |> show_error |> Option.iter (fun (result : Current_rpc.Engine.rebuild_result) ->
+    Fmt.pr "  Succeeded: %s@." (String.concat ", " result.succeeded);
+    Fmt.pr "  Failed: %s@." (String.concat ", " result.failed));
   Fmt.pr "@.";
 
   Fmt.pr "=== Demo Complete ===@.";
-  Capnp_rpc_lwt.Capability.dec_ref service;
-  Lwt.return_unit
+  Capnp_rpc.Capability.dec_ref service
 
-let () = Lwt_main.run (run ())
+let () =
+  Eio_main.run @@ fun _env ->
+  run ()

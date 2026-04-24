@@ -72,22 +72,20 @@ let pipeline ~app () =
   |> Github.Api.CheckRun.set_status head program_name
 
 let main config mode app =
-  Lwt_main.run begin
-    let has_role = Current_web.Site.allow_all in
-    let engine = Current.Engine.create ~config (pipeline ~app) in
-    let webhook_secret = Current_github.App.webhook_secret app in
-    (* this example does not have support for looking up job_ids for a commit *)
-    let get_job_ids = (fun ~owner:_owner ~name:_name ~hash:_hash -> []) in
-    let routes =
-      Routes.(s "webhooks" / s "github" /? nil @--> Github.webhook ~engine ~get_job_ids ~webhook_secret) ::
-      Current_web.routes engine
-    in
-    let site = Current_web.Site.(v ~has_role) ~name:program_name routes in
-    Lwt.choose [
-      Current.Engine.thread engine;
-      Current_web.run ~mode site;
-    ]
-  end
+  Eio_main.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  Current.Engine_env.init ~sw ~env;
+  let has_role = Current_web.Site.allow_all in
+  let engine = Current.Engine.create ~config (pipeline ~app) in
+  let webhook_secret = Current_github.App.webhook_secret app in
+  (* this example does not have support for looking up job_ids for a commit *)
+  let get_job_ids = (fun ~owner:_owner ~name:_name ~hash:_hash -> []) in
+  let routes =
+    Routes.(s "webhooks" / s "github" /? nil @--> Github.webhook ~engine ~get_job_ids ~webhook_secret) ::
+    Current_web.routes engine
+  in
+  let site = Current_web.Site.(v ~has_role) ~name:program_name routes in
+  Current_web.run ~mode site
 
 (* Command-line parsing *)
 

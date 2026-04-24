@@ -12,8 +12,6 @@
 
 let program_name = "rpc_server"
 
-open Lwt.Infix
-
 module Git = Current_git
 module Docker = Current_docker.Default
 module Rpc = Current_rpc.Impl(Current)
@@ -34,24 +32,21 @@ let pipeline ~repo () =
   let image = Docker.build ~pull ~timeout (`Git src) in
   Docker.run image ~args:["dune"; "exec"; "--"; "examples/docker_build_local.exe"; "--help"]
 
-let main config mode capnp repo =
+let main env config mode capnp repo =
+  Eio.Switch.run @@ fun sw ->
+  Current.Engine_env.init ~sw ~env;
   let repo = Git.Local.v (Fpath.v repo) in
   let engine = Current.Engine.create ~config (pipeline ~repo) in
   let service_id = Capnp_rpc_unix.Vat_config.derived_id capnp "engine" in
   let restore = Capnp_rpc_net.Restorer.single service_id (Rpc.engine engine) in
-  Lwt_main.run begin
-    Capnp_rpc_unix.serve capnp ~restore >>= fun vat ->
-    let uri = Capnp_rpc_unix.Vat.sturdy_uri vat service_id in
-    let ch = open_out cap_file in
-    output_string ch (Uri.to_string uri ^ "\n");
-    close_out ch;
-    Logs.app (fun f -> f "Wrote capability reference to %S" cap_file);
-    let site = Current_web.Site.(v ~has_role:allow_all) ~name:program_name (Current_web.routes engine) in
-    Lwt.choose [
-      Current.Engine.thread engine;
-      Current_web.run ~mode site;
-    ]
-  end
+  let vat = Capnp_rpc_unix.serve ~sw ~restore capnp in
+  let uri = Capnp_rpc_unix.Vat.sturdy_uri vat service_id in
+  let ch = open_out cap_file in
+  output_string ch (Uri.to_string uri ^ "\n");
+  close_out ch;
+  Logs.app (fun f -> f "Wrote capability reference to %S" cap_file);
+  let site = Current_web.Site.(v ~has_role:allow_all) ~name:program_name (Current_web.routes engine) in
+  Current_web.run ~mode site
 
 (* Command-line parsing *)
 
@@ -67,13 +62,13 @@ let repo =
 
 let man = [
   `S Manpage.s_options;
-  (* Update once https://github.com/mirage/capnp-rpc/pull/163 is merged: *)
-  (* `S "CAP'N PROTO OPTIONS"; *)
 ]
 
-let cmd =
+let cmd env =
   let doc = "A build server that can be controlled via Cap'n Proto RPC" in
   let info = Cmd.info program_name ~doc ~man in
-  Cmd.v info Term.(term_result (const main $ Current.Config.cmdliner $ Current_web.cmdliner $ Capnp_rpc_unix.Vat_config.cmd $ repo))
+  Cmd.v info Term.(term_result (const (main env) $ Current.Config.cmdliner $ Current_web.cmdliner $ Capnp_rpc_unix.Vat_config.cmd env $ repo))
 
-let () = exit @@ Cmd.eval cmd
+let () =
+  Eio_main.run @@ fun env ->
+  exit @@ Cmd.eval (cmd env)

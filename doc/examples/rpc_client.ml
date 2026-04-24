@@ -40,5 +40,5 @@
 let () = Prometheus_unix.Logging.init ~default_level:Logs.Warning ()
 
 let () =
-  let cmd = Current_rpc.Client.Cmdliner.standalone_cmd ~name:"rpc_client" () in
+  let cmd = Current_rpc.Client.Cmdliner.cmd "rpc_client" "v2.0" in
   exit @@ Cmdliner.Cmd.eval cmd

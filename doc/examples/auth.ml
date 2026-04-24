@@ -28,6 +28,9 @@ let has_role user role =
     | _ -> false
 
 let main config mode repo auth =
+  Eio_main.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  Current.Engine_env.init ~sw ~env;
   let repo = Git.Local.v (Fpath.v repo) in
   let engine = Current.Engine.create ~config (pipeline ~repo) in
   let authn = Option.map Current_github.Auth.make_login_uri auth in
@@ -35,12 +38,7 @@ let main config mode repo auth =
     Routes.(s "login" /? nil @--> Current_github.Auth.login auth) ::
     Current_web.routes engine in
   let site = Current_web.Site.v ?authn ~has_role ~name:program_name routes in
-  Lwt_main.run begin
-    Lwt.choose [
-      Current.Engine.thread engine;
-      Current_web.run ~mode site;
-    ]
-  end
+  Current_web.run ~mode site
 
 (* Command-line parsing *)
 

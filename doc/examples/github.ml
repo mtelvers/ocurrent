@@ -54,6 +54,9 @@ let pipeline ~github ~repo () =
   |> Github.Api.Commit.set_status head "ocurrent"
 
 let main config mode github repo =
+  Eio_main.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  Current.Engine_env.init ~sw ~env;
   let has_role = Current_web.Site.allow_all in
   let engine = Current.Engine.create ~config (pipeline ~github ~repo) in
   (* this example does not have support for looking up job_ids for a commit *)
@@ -63,12 +66,7 @@ let main config mode github repo =
     Current_web.routes engine
   in
   let site = Current_web.Site.(v ~has_role) ~name:program_name routes in
-  Lwt_main.run begin
-    Lwt.choose [
-      Current.Engine.thread engine;
-      Current_web.run ~mode site;
-    ]
-  end
+  Current_web.run ~mode site
 
 (* Command-line parsing *)
 

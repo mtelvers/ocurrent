@@ -28,15 +28,13 @@ let pipeline ~repo ~service () =
   Docker.service ~name:service ~image ()
 
 let main config mode service repo =
+  Eio_main.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  Current.Engine_env.init ~sw ~env;
   let repo = Git.Local.v (Fpath.v repo) in
   let engine = Current.Engine.create ~config (pipeline ~repo ~service) in
   let site = Current_web.Site.(v ~has_role:allow_all) ~name:program_name (Current_web.routes engine) in
-  Lwt_main.run begin
-    Lwt.choose [
-      Current.Engine.thread engine;
-      Current_web.run ~mode site;
-    ]
-  end
+  Current_web.run ~mode site
 
 (* Command-line parsing *)
 

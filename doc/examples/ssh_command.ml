@@ -18,14 +18,12 @@ let pipeline ~host ~args () =
   Current.all [ ssh ]
 
 let main config mode host args =
+  Eio_main.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  Current.Engine_env.init ~sw ~env;
   let engine = Current.Engine.create ~config (pipeline ~host ~args) in
   let site = Current_web.Site.(v ~has_role:allow_all) ~name:program_name (Current_web.routes engine) in
-  Lwt_main.run begin
-    Lwt.choose [
-      Current.Engine.thread engine;
-      Current_web.run ~mode site;
-    ]
-  end
+  Current_web.run ~mode site
 
 (* Command-line parsing *)
 

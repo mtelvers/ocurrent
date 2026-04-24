@@ -58,6 +58,9 @@ let pipeline ~gitlab ~repo_id () =
   |> Gitlab.Api.Commit.set_status head program_name
 
 let main config mode gitlab repo =
+  Eio_main.run @@ fun env ->
+  Eio.Switch.run @@ fun sw ->
+  Current.Engine_env.init ~sw ~env;
   let has_role = Current_web.Site.allow_all in
   let engine = Current.Engine.create ~config (pipeline ~gitlab ~repo_id:repo) in
   let routes =
@@ -65,12 +68,7 @@ let main config mode gitlab repo =
     Current_web.routes engine
   in
   let site = Current_web.Site.(v ~has_role) ~name:program_name routes in
-  Lwt_main.run begin
-    Lwt.choose [
-      Current.Engine.thread engine;
-      Current_web.run ~mode site;
-    ]
-  end
+  Current_web.run ~mode site
 
 (* Command-line parsing *)
 
