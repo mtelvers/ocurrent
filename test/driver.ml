@@ -104,15 +104,18 @@ let test env ?config ?final_stats ~name v actions =
         step := -1
     end;
     incr step;
+    (* Yield until the engine has an input ready for the next iteration.
+       Check [is_resolved] BEFORE giving up so we don't spuriously fail on
+       the last allowed yield. *)
     let rec wait i =
-      match i with
-      | 0 -> failwith "No inputs ready (tests stuck)!"
-      | i when not (Eio.Promise.is_resolved next) ->
+      if Eio.Promise.is_resolved next then ()
+      else if i = 0 then failwith "No inputs ready (tests stuck)!"
+      else (
         Eio.Fiber.yield ();
         wait (i - 1)
-      | _ -> ()
+      )
     in
-    wait 20
+    wait 3
   in
   try
     Eio.Switch.run (fun sw ->
