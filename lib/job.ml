@@ -211,14 +211,16 @@ let start_with ?timeout ~pool ~level t =
   );
   Eio.Promise.resolve t.set_start_time (!timestamp ());
   timeout |> Option.iter (fun duration ->
-    (* Fork on the job's switch so the timer is cancelled cleanly when the
-       job ends. Eio's switch cancellation unwinds through [!sleep] and the
-       fiber exits silently via the fork's error handler. *)
-    Eio.Fiber.fork ~sw:t.switch (fun () ->
+    (* Fork as a *daemon* on the job's switch: a non-daemon fiber would
+       keep [Switch.run] alive until the sleep finished, blocking the
+       job's on_release hook (and the log-stream broadcast) for every
+       job that completes before its timeout. *)
+    Eio.Fiber.fork_daemon ~sw:t.switch (fun () ->
       !sleep (Duration.to_f duration);
-      match t.cancel_hooks with
-      | `Cancelled _ -> ()
-      | `Hooks _ -> cancel t (Fmt.str "Timeout (%a)" pp_duration duration)
+      (match t.cancel_hooks with
+       | `Cancelled _ -> ()
+       | `Hooks _ -> cancel t (Fmt.str "Timeout (%a)" pp_duration duration));
+      `Stop_daemon
     )
   );
   r
