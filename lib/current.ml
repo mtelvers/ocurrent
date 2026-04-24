@@ -261,7 +261,7 @@ module Monitor = struct
     if t.ref_count = 0 then disable ~unwatch t
     else if t.need_refresh then get_value ~unwatch t
     else begin
-      Eio.Mutex.use_rw ~protect:false t.mutex (fun () ->
+      Eio.Mutex.use_ro t.mutex (fun () ->
         Eio.Condition.await t.cond t.mutex);
       wait ~unwatch t
     end

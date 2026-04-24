@@ -163,7 +163,7 @@ let monitor_installations t () =
         Log.warn (fun f -> f "Failed to update list of installations: %s" m)
     end;
     Eio.Time.sleep (Current.Engine_env.clock ()) 60.0;   (* Wait at least 1m between updates *)
-    Eio.Mutex.use_rw ~protect:false installations_changed_mutex (fun () ->
+    Eio.Mutex.use_ro installations_changed_mutex (fun () ->
       Eio.Condition.await installations_changed_cond installations_changed_mutex);
     aux ()
   in

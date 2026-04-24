@@ -224,7 +224,11 @@ let start ?timeout ?(pool=no_pool) = start_with ?timeout ~pool
 let start_time t = t.start_time
 
 let wait_for_log_data t =
-  Eio.Mutex.use_rw ~protect:false t.log_mutex (fun () ->
+  (* [use_ro] so that if the awaiting fiber is cancelled (e.g. the HTTP
+     client serving a log-tail disconnects) the mutex is simply released —
+     not poisoned, which would break every subsequent request for the same
+     job's log. *)
+  Eio.Mutex.use_ro t.log_mutex (fun () ->
     Eio.Condition.await t.log_cond t.log_mutex)
 
 let lookup_running id = Map.find_opt id !jobs

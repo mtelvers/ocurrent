@@ -17,7 +17,7 @@ let webhook_entry owner_name =
 
 let await_event ~owner_name =
   let cond, mutex = webhook_entry owner_name in
-  Eio.Mutex.use_rw ~protect:false mutex (fun () ->
+  Eio.Mutex.use_ro mutex (fun () ->
     Eio.Condition.await cond mutex)
 
 type actions = < rebuild : (unit -> string) option; >

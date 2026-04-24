@@ -98,7 +98,7 @@ let v ~iid ~account ~api =
       let rec aux () =
         if !stop then `Stop_daemon
         else begin
-          Eio.Mutex.use_rw ~protect:false installation_repositories_mutex (fun () ->
+          Eio.Mutex.use_ro installation_repositories_mutex (fun () ->
             Eio.Condition.await installation_repositories_cond installation_repositories_mutex);
           refresh ();
           aux ()

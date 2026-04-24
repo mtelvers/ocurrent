@@ -227,7 +227,7 @@ let get_token t =
 
 let await_event ~owner_name =
   let cond, mutex = webhook_entry owner_name in
-  Eio.Mutex.use_rw ~protect:false mutex (fun () ->
+  Eio.Mutex.use_ro mutex (fun () ->
     Eio.Condition.await cond mutex)
 
 (* GitLab API v4 client. Replaces the Lwt-based [Gitlab] library's

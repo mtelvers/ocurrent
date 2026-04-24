@@ -25,7 +25,7 @@ let start_slow_start ~sw ~clock t =
             Eio.Time.sleep clock (Duration.to_f duration);
             `Timeout)
           (fun () ->
-            Eio.Mutex.use_rw ~protect:false t.level_mutex (fun () ->
+            Eio.Mutex.use_ro t.level_mutex (fun () ->
               Eio.Condition.await t.level_cond t.level_mutex);
             `Changed)
       in
@@ -50,7 +50,7 @@ let now = Current_incr.of_var active_config
 let rec confirmed l t =
   match t.confirm with
   | Some threshold when Level.compare l threshold >= 0 ->
-    Eio.Mutex.use_rw ~protect:false t.level_mutex (fun () ->
+    Eio.Mutex.use_ro t.level_mutex (fun () ->
       Eio.Condition.await t.level_cond t.level_mutex);
     confirmed l t
   | _ ->
