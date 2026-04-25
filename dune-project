@@ -77,8 +77,11 @@ run steps in parallel where possible.")
   bos
   (ca-certs (>= 1.0))
   (cmdliner (>= 1.1.0))
+  (cohttp (>= 6.0.0))
+  (cohttp-eio (>= 6.0.0))
   (current_incr (>= 0.6.1))
   (current_term (= :version))
+  domain-name
   duration
   (eio (>= 1.0))
   (fmt (>= 0.8.9))
@@ -90,6 +93,9 @@ run steps in parallel where possible.")
   (re (>= 1.9.0))
   (result (>= 1.5))
   sqlite3
+  (tls (>= 2.0))
+  (tls-eio (>= 2.0))
+  (uri (>= 4.0.0))
   (alcotest (and :with-test (>= 1.2.0)))))
 
 (package
