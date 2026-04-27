@@ -16,6 +16,11 @@ module Metrics = struct
     Counter.v_label ~label_name:"event" ~help ~namespace ~subsystem "webhook_events_total"
 end
 
+let hex_of_string s =
+  let buf = Buffer.create (String.length s * 2) in
+  String.iter (fun c -> Buffer.add_string buf (Printf.sprintf "%02x" (Char.code c))) s;
+  Buffer.contents buf
+
 let validate_webhook_payload webhook_secret body headers event =
   let request_signature = Option.value ~default:"<empty>" (Cohttp.Header.get headers "X-Hub-Signature-256") in
   let mac =
@@ -23,6 +28,19 @@ let validate_webhook_payload webhook_secret body headers event =
     |> Digestif.SHA256.to_hex
   in
   let signature = "sha256=" ^ mac in
+  (* DEBUG: dump everything the webhook validator sees so we can correlate
+     against what GitHub claims to have signed. *)
+  let content_length =
+    Option.value ~default:"<absent>" (Cohttp.Header.get headers "Content-Length")
+  in
+  let secret_fingerprint =
+    Digestif.SHA256.digest_string webhook_secret |> Digestif.SHA256.to_hex
+  in
+  Log.info (fun f -> f
+    "webhook validate: event=%S content-length=%s body-bytes=%d secret-bytes=%d \
+     secret-sha256=%s expected=%s received=%s body-hex=%s"
+    event content_length (String.length body) (String.length webhook_secret)
+    secret_fingerprint signature request_signature (hex_of_string body));
   if Eqaf.equal signature request_signature then
     Ok ()
   else
