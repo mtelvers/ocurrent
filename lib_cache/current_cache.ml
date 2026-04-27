@@ -1,31 +1,25 @@
 module Job = Current.Job
 
-(** Engine-wired runtime context, used to fork per-slot switches and to
-    construct jobs. [Engine.create] calls [init] once at startup; the cache
-    machinery stays self-contained otherwise. *)
-module Runtime = struct
-  type t = {
-    sw : Eio.Switch.t;       (* parent of every slot switch *)
-    clock : float Eio.Time.clock_ty Eio.Resource.t;
-    process_mgr : Eio_unix.Process.mgr_ty Eio.Resource.t;
-    fs : Eio.Fs.dir_ty Eio.Path.t;
-  }
+(** Per-engine capabilities for cache instances: the parent switch, the
+    capabilities a cache slot needs to construct {!Current.Job.t}s, and the
+    engine-wide registry of in-flight jobs. Built once via
+    {!caps_of_engine} and shared across every {!Make}/{!Output}/{!Generic}
+    cache the plugin or pipeline constructs. *)
+type caps = {
+  sw : Eio.Switch.t;
+  clock : float Eio.Time.clock_ty Eio.Resource.t;
+  process_mgr : Eio_unix.Process.mgr_ty Eio.Resource.t;
+  fs : Eio.Fs.dir_ty Eio.Path.t;
+  cache_registry : Current.Engine.cache_registry;
+}
 
-  let runtime : t option ref = ref None
-
-  let init ~sw ~clock ~process_mgr ~fs =
-    runtime := Some { sw; clock; process_mgr; fs }
-
-  let get () =
-    match !runtime with
-    | Some r -> r
-    | None -> failwith "Current_cache.init has not been called (Engine.create wires this)"
-end
-
-let () =
-  Current.Engine.register_init
-    (fun ~sw ~clock ~process_mgr ~fs ~net:_ ->
-       Runtime.init ~sw ~clock ~process_mgr ~fs)
+let caps_of_engine engine = {
+  sw = Current.Engine.switch engine;
+  clock = Current.Engine.clock engine;
+  process_mgr = Current.Engine.process_mgr engine;
+  fs = Current.Engine.fs engine;
+  cache_registry = Current.Engine.cache_registry engine;
+}
 
 module Metrics = struct
   open Prometheus
@@ -41,11 +35,6 @@ module Metrics = struct
     let help = "Number of evaluations performed" in
     Counter.v ~help ~namespace ~subsystem "evaluations_total"
 end
-
-(* For each live job, the (op, key) of the database entry it will create.
-   This is used to show build history for live jobs, which aren't yet in the database. *)
-let key_of_job_id = Hashtbl.create 10
-let job_id_of_key = Hashtbl.create 10
 
 module Schedule = struct
   type t = {
@@ -110,6 +99,7 @@ module Generic(Op : S.GENERIC) = struct
     (** A previous outcome that can still be used while rebuilding. *)
 
     type t = {
+      caps : caps;                          (* Capabilities for jobs and the registry. *)
       key : Op.Key.t;
       mutable build_number : int64;         (* Number of recorded (incl failed) builds with this key. *)
       mutable ref_count : int;              (* The number of watchers waiting for the result (for auto-cancel). *)
@@ -192,6 +182,25 @@ module Generic(Op : S.GENERIC) = struct
       Current_incr.change t.notify () ~eq:(fun _ _ -> false);
       Current.Engine.update ()
 
+    (* Spawn a switch as a child of [parent_sw]. The new switch lives until
+       [release_r] is resolved; even after that, [Switch.run] still waits
+       for any child fibers before closing. Returns the switch and the
+       resolver that closes it.
+
+       Building block for per-slot switches (parent = engine sw) and
+       per-timer sub-switches (parent = slot_sw). *)
+    let spawn_managed_switch ~parent_sw =
+      let sw_p, sw_r = Eio.Promise.create () in
+      let release_p, release_r = Eio.Promise.create () in
+      Eio.Fiber.fork_daemon ~sw:parent_sw (fun () ->
+        Eio.Switch.run (fun sw ->
+          Eio.Promise.resolve sw_r sw;
+          Eio.Promise.await release_p);
+        `Stop_daemon);
+      Eio.Promise.await sw_p, release_r
+
+    let spawn_slot_switch ~caps = spawn_managed_switch ~parent_sw:caps.sw
+
     (* If [t] isn't in (or moving to) the desired state, start a thread to do that,
        unless we already tried that and failed. Only call this if the instance is currently
        wanted. If called from an async thread, you must call [notify] afterwards too. *)
@@ -233,23 +242,23 @@ module Generic(Op : S.GENERIC) = struct
       let priority = if latched = None then `High else `Low in
       let key_digest = Op.Key.digest t.key in
       let job_id_ref = ref None in
-      let runtime = Runtime.get () in
+      let registry = t.caps.cache_registry in
       Eio.Fiber.fork ~sw:t.slot_sw (fun () ->
         Fun.protect
           (fun () ->
              Eio.Switch.run (fun job_sw ->
                let job =
                  Job.create ~priority ~sw:job_sw
-                   ~clock:runtime.Runtime.clock
-                   ~process_mgr:runtime.Runtime.process_mgr
-                   ~fs:runtime.Runtime.fs
+                   ~clock:t.caps.clock
+                   ~process_mgr:t.caps.process_mgr
+                   ~fs:t.caps.fs
                    ~label:Op.id ~config ()
                in
                let job_id = Job.id job in
                job_id_ref := Some job_id;
                t.job_id <- Some job_id;
                let op = { value = t.desired; job; autocancelled = false } in
-               let ready = !Job.timestamp () |> Unix.gmtime in
+               let ready = Eio.Time.now t.caps.clock |> Unix.gmtime in
                t.op <- `Active (op, latched);
                let pp_op f = pp_op f (t.key, op.value) in
                Job.log job "New job: %t" pp_op;
@@ -258,14 +267,14 @@ module Generic(Op : S.GENERIC) = struct
                  Eio.Fiber.yield ();        (* Ensure we're outside any propagate *)
                  notify t
                );
-               Hashtbl.add key_of_job_id job_id (Op.id, key_digest);
-               Hashtbl.add job_id_of_key (Op.id, key_digest) job_id;
+               Hashtbl.add registry.key_of_job_id job_id (Op.id, key_digest);
+               Hashtbl.add registry.job_id_of_key (Op.id, key_digest) job_id;
                let outcome =
                  try Op.run ctx job t.key (Value.value op.value)
                  with ex -> Error (`Msg (Printexc.to_string ex))
                in
                Eio.Fiber.yield ();        (* Ensure we're outside any propagate *)
-               let end_time = Unix.gmtime @@ !Job.timestamp () in
+               let end_time = Unix.gmtime @@ Eio.Time.now t.caps.clock in
                if op.autocancelled then (
                  t.op <- `Retry latched;
                  invalidate t
@@ -289,7 +298,7 @@ module Generic(Op : S.GENERIC) = struct
                      | None -> outcome
                      | Some e -> Error (`Msg e)
                  in
-                 t.mtime <- !Job.timestamp ();
+                 t.mtime <- Eio.Time.now t.caps.clock;
                  Db.record ~op:Op.id ~job_id
                    ~key:key_digest
                    ~value:(Value.digest op.value)
@@ -313,8 +322,8 @@ module Generic(Op : S.GENERIC) = struct
           ~finally:(fun () ->
              (match !job_id_ref with
               | Some job_id ->
-                Hashtbl.remove key_of_job_id job_id;
-                Hashtbl.remove job_id_of_key (Op.id, key_digest)
+                Hashtbl.remove registry.key_of_job_id job_id;
+                Hashtbl.remove registry.job_id_of_key (Op.id, key_digest)
               | None -> ());
              (* While we were working, we might have decided we wanted something else.
                 If so, start that now. *)
@@ -325,47 +334,38 @@ module Generic(Op : S.GENERIC) = struct
 
     let limit_expires t time =
       let set () =
-        let remaining_time = time -. !Job.timestamp () in
-        let cancel_p, cancel_r = Eio.Promise.create () in
-        let cancelled = ref false in
-        Eio.Fiber.fork ~sw:t.slot_sw (fun () ->
-          let result =
-            try
-              Eio.Fiber.first
-                (fun () ->
-                   if remaining_time > 0.0 then !Job.sleep remaining_time;
-                   `Fired)
-                (fun () -> Eio.Promise.await cancel_p; `Cancelled)
-            with
-            | Eio.Cancel.Cancelled _ -> `Cancelled
-            | ex ->
-              Log.err (fun f -> f "Expiry thread failed: %a" Fmt.exn ex);
-              `Cancelled
-          in
-          match result with
-          | `Cancelled -> ()
-          | `Fired ->
+        let remaining_time = time -. Eio.Time.now t.caps.clock in
+        (* Each timer gets its own switch under [t.slot_sw]. Cancelling
+           the timer = closing its switch (resolving [release]). The fiber
+           below either runs to completion (timer fired) or is cancelled
+           via the switch. *)
+        let timer_sw, release = spawn_managed_switch ~parent_sw:t.slot_sw in
+        Eio.Fiber.fork ~sw:timer_sw (fun () ->
+          try
+            if remaining_time > 0.0 then Eio.Time.sleep t.caps.clock remaining_time;
             Eio.Fiber.yield ();        (* Ensure we're outside any propagate *)
-            if not !cancelled then (
-              t.expires <- None;
-              Log.info (fun f -> f "Result for %a has expired" pp_desired t);
-              let latched =
-                match t.op with
-                | `Finished x -> Some x
-                | `Retry x -> x
-                | _ -> None
-              in
-              t.op <- `Retry latched;
-              t.current <- None;
-              match Current_incr.observe Current.Config.now with
-              | Some config -> maybe_restart ~config t
-              | None -> Log.warn (fun f -> f "Can't trigger restart as config is now None (shutting down?)")
-            )
+            t.expires <- None;
+            Log.info (fun f -> f "Result for %a has expired" pp_desired t);
+            let latched =
+              match t.op with
+              | `Finished x -> Some x
+              | `Retry x -> x
+              | _ -> None
+            in
+            t.op <- `Retry latched;
+            t.current <- None;
+            (match Current_incr.observe Current.Config.now with
+             | Some config -> maybe_restart ~config t
+             | None -> Log.warn (fun f -> f "Can't trigger restart as config is now None (shutting down?)"));
+            (* Close the timer switch now that we've finished firing. *)
+            (try Eio.Promise.resolve release () with _ -> ())
+          with
+          | Eio.Cancel.Cancelled _ -> ()
+          | ex ->
+            Log.err (fun f -> f "Expiry thread failed: %a" Fmt.exn ex)
         );
         let cancel () =
-          cancelled := true;
-          if not (Eio.Promise.is_resolved cancel_p) then
-            try Eio.Promise.resolve cancel_r () with _ -> ()
+          try Eio.Promise.resolve release () with _ -> ()
         in
         t.expires <- Some (time, cancel)
       in
@@ -379,26 +379,26 @@ module Generic(Op : S.GENERIC) = struct
       | Some (_, cancel) -> cancel (); t.expires <- None
       | None -> ()
 
-    (* Open a fresh slot switch, parented under the runtime. The slot lives
-       until [release_r] is resolved; even after that, [Switch.run] still
-       waits for any child fibers (notably an in-flight job runner) before
-       closing. Returns the switch and the resolver that closes it. *)
-    let spawn_slot_switch () =
-      let runtime = Runtime.get () in
-      let sw_p, sw_r = Eio.Promise.create () in
-      let release_p, release_r = Eio.Promise.create () in
-      Eio.Fiber.fork_daemon ~sw:runtime.Runtime.sw (fun () ->
-        Eio.Switch.run (fun slot_sw ->
-          Eio.Promise.resolve sw_r slot_sw;
-          Eio.Promise.await release_p);
-        `Stop_daemon);
-      Eio.Promise.await sw_p, release_r
-
     (* Create a new in-memory instance, initialising it from the database. *)
-    let load ~release ctx key desired =
-      let slot_sw, slot_release_r = spawn_slot_switch () in
+    let load ~caps ~release ctx key desired =
+      let slot_sw, slot_release_r = spawn_slot_switch ~caps in
+      let cleaned = ref false in
+      let do_cleanup () =
+        if not !cleaned then begin
+          cleaned := true;
+          (* Original [release]: removes the Instance from the map and
+             decrements the prometheus gauge. Wrap in [try] because the
+             switch's on_release may fire after the assertion in
+             [release] would no longer hold. *)
+          (try release () with _ -> ())
+        end
+      in
+      (* Always run cleanup when the slot switch closes — whether via
+         normal [release] (resolves [slot_release_r]) or via the engine
+         switch being cancelled (cancellation propagates here). *)
+      Eio.Switch.on_release slot_sw do_cleanup;
       let release () =
-        release ();
+        do_cleanup ();
         Eio.Promise.resolve slot_release_r ()
       in
       let step_id = Current.Engine.Step.now () in
@@ -422,7 +422,7 @@ module Generic(Op : S.GENERIC) = struct
         | None -> None, None, `Retry None, Unix.gettimeofday (), 0L
       in
       let notify = Current_incr.var () in
-      { key; current; desired; ctx; op; job_id; last_set = step_id;
+      { caps; key; current; desired; ctx; op; job_id; last_set = step_id;
         ref_count = 0; release; mtime; build_number; notify; expires = None;
         slot_sw }
 
@@ -456,7 +456,7 @@ module Generic(Op : S.GENERIC) = struct
           Current.Job.register_actions job_id @@
           object
             method pp f =
-              let remaining_time = expires -. !Job.timestamp () in
+              let remaining_time = expires -. Eio.Time.now t.caps.clock in
               if remaining_time <= 0.0 then
                 Fmt.pf f "%a (expired)" pp_op (key, t.desired)
               else
@@ -547,20 +547,27 @@ module Generic(Op : S.GENERIC) = struct
 
   module Instances = Map.Make(String)
 
-  (* The in-memory cache. *)
-  let instances : Instance.t Instances.t ref = ref Instances.empty
+  (** A per-Op cache instance: the in-memory map of slots, plus the
+      capabilities each slot needs. Created via {!create}; held by the
+      plugin that owns this cache. *)
+  type t = {
+    caps : caps;
+    instances : Instance.t Instances.t ref;
+  }
+
+  let create ~caps = { caps; instances = ref Instances.empty }
 
   (* Caller needs to notify about the change, if needed. *)
-  let invalidate key =
+  let invalidate t key =
     let key = Op.Key.digest key in
-    match Instances.find_opt key !instances with
+    match Instances.find_opt key !(t.instances) with
     | Some i ->
       i.op <- `Retry None;
       Instance.invalidate i     (* (also invalidates the database) *)
     | None ->
       Db.invalidate ~op:Op.id key
 
-  let run ?(schedule=Schedule.default) ctx key value =
+  let run t ?(schedule=Schedule.default) ctx key value =
     Current_incr.of_cc begin
       Current_incr.read Current.Config.now @@ function
       | None -> Current_incr.write (Error (`Active `Ready), None)
@@ -570,7 +577,7 @@ module Generic(Op : S.GENERIC) = struct
         let value = Value.v value in
         (* Ensure the instance exists and has [i.desired = value]: *)
         let i =
-          match Instances.find_opt key_digest !instances with
+          match Instances.find_opt key_digest !(t.instances) with
           | Some i ->
             (* Instance already exists in the memory cache. Update it if needed. *)
             Instance.update ~ctx i ~value;
@@ -579,21 +586,21 @@ module Generic(Op : S.GENERIC) = struct
             (* Not in memory cache. Restore from disk if available, or create a new instance if not.
                Either way, [i.desired] is set to [value]. *)
             let release () =
-              assert (Instances.mem key_digest !instances);
-              instances := Instances.remove key_digest !instances;
+              assert (Instances.mem key_digest !(t.instances));
+              t.instances := Instances.remove key_digest !(t.instances);
               Prometheus.Gauge.dec_one (Metrics.memory_cache_items Op.id)
             in
-            let i = Instance.load ~release ctx key value in
-            instances := Instances.add key_digest i !instances;
+            let i = Instance.load ~caps:t.caps ~release ctx key value in
+            t.instances := Instances.add key_digest i !(t.instances);
             Prometheus.Gauge.inc_one (Metrics.memory_cache_items Op.id);
             i
         in
         Instance.run ~config ~schedule i
     end
 
-  let reset ~db =
-    !instances |> Instances.iter (fun _ i -> i.Instance.ref_count <- -1);
-    instances := Instances.empty;
+  let reset t ~db =
+    !(t.instances) |> Instances.iter (fun _ i -> i.Instance.ref_count <- -1);
+    t.instances := Instances.empty;
     Prometheus.Gauge.set (Metrics.memory_cache_items Op.id) 0.0;
     if db then
       Db.drop_all Op.id
@@ -619,10 +626,16 @@ module Make(B : S.BUILDER) = struct
     let latched = false
   end
 
-  include Generic(Adaptor)
+  module Op = Generic(Adaptor)
 
-  let get ?schedule ctx key =
-    run ?schedule ctx key ()
+  type t = Op.t
+  let create = Op.create
+
+  let get t ?schedule ctx key =
+    Op.run t ?schedule ctx key ()
+
+  let invalidate = Op.invalidate
+  let reset = Op.reset
 end
 
 module Output(P : S.PUBLISHER) = struct
@@ -632,10 +645,15 @@ module Output(P : S.PUBLISHER) = struct
     let latched = false
   end
 
-  include Generic(Adaptor)
+  module Op = Generic(Adaptor)
 
-  let set ?schedule ctx key value =
-    run ?schedule ctx key value
+  type t = Op.t
+  let create = Op.create
+
+  let set t ?schedule ctx key value =
+    Op.run t ?schedule ctx key value
+
+  let reset = Op.reset
 end
 
 module S = S
@@ -643,12 +661,12 @@ module S = S
 module Db = struct
   include Db
 
-  let key ~job_id = 
+  let key ~job_id =
     lookup_job_id job_id |> Option.map snd
 
-  let history ~limit ~job_id =
+  let history ~registry ~limit ~job_id =
     let key =
-      match Hashtbl.find_opt key_of_job_id job_id with
+      match Hashtbl.find_opt registry.Current.Engine.key_of_job_id job_id with
       | None -> Db.lookup_job_id job_id
       | Some _ as k -> k
     in
@@ -656,6 +674,6 @@ module Db = struct
     | None -> None, []
     | Some (op, key) ->
       let complete = Db.history ~limit ~op key in
-      let active = Hashtbl.find_opt job_id_of_key (op, key) in
+      let active = Hashtbl.find_opt registry.Current.Engine.job_id_of_key (op, key) in
       active, complete
 end

@@ -176,67 +176,6 @@ module Commit_id = struct
       | `MR _ -> None
 end
 
-type t = {
-  get_token : unit -> token;
-  webhook_secret : string;  (* Shared secret for validating webhooks from GitLab *)
-  token_lock : Eio.Mutex.t;
-  sw : Eio.Switch.t;
-  clock : float Eio.Time.clock_ty Eio.Resource.t;
-  http : Current_http.t;
-  mutable token : token;
-  mutable head_monitors : commit Current.Monitor.t Repo_map.t;
-  mutable refs_monitors : refs Current.Monitor.t Repo_map.t;
-}
-and commit = t * Commit_id.t
-and refs = {
-  default_ref : Ref.t;
-  all_refs : commit Ref_map.t
-}
-
-let webhook_secret t = t.webhook_secret
-let sw t = t.sw
-let clock t = t.clock
-let http t = t.http
-
-let default_ref t = t.default_ref
-
-let all_refs t = t.all_refs
-
-let v ~sw ~clock ~http ~get_token ~webhook_secret () =
-  let head_monitors = Repo_map.empty in
-  let refs_monitors = Repo_map.empty in
-  let token_lock = Eio.Mutex.create () in
-  { get_token; token_lock; token = no_token; head_monitors; refs_monitors; webhook_secret;
-    sw; clock; http }
-
-let of_oauth ~sw ~clock ~http ~token ~webhook_secret =
-  let get_token () = { token = Ok token; expiry = None} in
-  v ~sw ~clock ~http ~get_token ~webhook_secret ()
-
-let get_token t =
-  Eio.Mutex.use_rw ~protect:false t.token_lock @@ fun () ->
-  let now = Unix.gettimeofday () in
-  match t.token with
-  | { token; expiry = None } -> token
-  | { token; expiry = Some expiry } when now < expiry -> token
-  | _ ->
-    Log.info (fun f -> f "Getting API token");
-    let token =
-      try t.get_token ()
-      with ex ->
-        Log.warn (fun f -> f "Error getting GitLab token: %a" Fmt.exn ex);
-        let token = Error (`Msg "Failed to get GitLab token") in
-        let expiry = Some (now +. 60.0) in
-        {token; expiry}
-    in
-    t.token <- token;
-    token.token
-
-let await_event ~owner_name =
-  let cond, mutex = webhook_entry owner_name in
-  Eio.Mutex.use_ro mutex (fun () ->
-    Eio.Condition.await cond mutex)
-
 (* GitLab API v4 client. Replaces the Lwt-based [Gitlab] library's
    monadic API with direct HTTPS calls via [Current_http]. *)
 module Gl = struct
@@ -345,6 +284,140 @@ module Gl = struct
         (Cohttp.Code.string_of_status err) body
 end
 
+(* Lifted-out cache op. The Op.t is a small record (not the full Api.t),
+   so [Current_cache.Output(Commit_set_status).t] can be referenced from
+   the [Api.t] record below without a definitional cycle. *)
+module Commit_set_status = struct
+  let id = "gitlab-set-status"
+
+  type t = {
+    http : Current_http.t;
+    get_token_now : unit -> (string, [`Msg of string]) result;
+  }
+
+  module Key = struct
+    type t = {
+      commit : Commit_id.t;
+      context : string;
+    }
+    let to_json { commit; context } =
+      `Assoc [
+        "commit", `String (Commit_id.digest commit);
+        "context", `String context;
+      ]
+    let digest t = Yojson.Safe.to_string @@ to_json t
+  end
+
+  module Value = Status
+  module Outcome = Current.Unit
+
+  let auto_cancel = true
+
+  let pp f ({ Key.commit; context }, status) =
+    Fmt.pf f "Set %a/%s to@ %a"
+      Commit_id.pp commit
+      context
+      Value.pp status
+
+  let publish op job key (status : Value.t) =
+    let state_to_gitlab = function
+      | `Cancelled -> `Cancelled
+      | `Failure -> `Failed
+      | `Running -> `Running
+      | `Pending -> `Pending
+      | `Success -> `Success
+    in
+    Current.Job.start job ~pool ~level:Current.Level.Above_average;
+    let { Key.commit; context } = key in
+    match op.get_token_now () with
+    | Error (`Msg m) -> failwith m
+    | Ok token ->
+      (try
+         let sha = commit.Commit_id.hash in
+         let project_id = commit.repo.project_id in
+         let new_status : Gitlab_types_t.new_status =
+           { state = state_to_gitlab status.Status.state
+           ; name = Some context
+           ; target_url = Option.map Uri.to_string status.Status.url
+           ; ref_name = None
+           ; description = None
+           ; coverage = None
+           ; pipeline_id = None
+           }
+         in
+         let _ = Gl.set_commit_status ~http:op.http ~token ~project_id ~sha new_status in
+         Ok ()
+       with ex ->
+         Log.err (fun f -> f "@[<v2>%a failed: %a@]"
+                      pp (key, status)
+                      Fmt.exn ex);
+         Error (`Msg (Fmt.str "Failed to set GitLab status %a" Fmt.exn ex)))
+end
+
+module Commit_set_status_cache = Current_cache.Output(Commit_set_status)
+
+type t = {
+  get_token : unit -> token;
+  webhook_secret : string;  (* Shared secret for validating webhooks from GitLab *)
+  token_lock : Eio.Mutex.t;
+  caps : Current_cache.caps;
+  http : Current_http.t;
+  commit_set_status_cache : Commit_set_status_cache.t;
+  mutable token : token;
+  mutable head_monitors : commit Current.Monitor.t Repo_map.t;
+  mutable refs_monitors : refs Current.Monitor.t Repo_map.t;
+}
+and commit = t * Commit_id.t
+and refs = {
+  default_ref : Ref.t;
+  all_refs : commit Ref_map.t
+}
+
+let webhook_secret t = t.webhook_secret
+let sw t = t.caps.sw
+let clock t = t.caps.clock
+let http t = t.http
+
+let default_ref t = t.default_ref
+
+let all_refs t = t.all_refs
+
+let v ~caps ~http ~get_token ~webhook_secret () =
+  let head_monitors = Repo_map.empty in
+  let refs_monitors = Repo_map.empty in
+  let token_lock = Eio.Mutex.create () in
+  { get_token; token_lock; token = no_token; head_monitors; refs_monitors; webhook_secret;
+    caps; http;
+    commit_set_status_cache = Commit_set_status_cache.create ~caps }
+
+let of_oauth ~caps ~http ~token ~webhook_secret =
+  let get_token () = { token = Ok token; expiry = None} in
+  v ~caps ~http ~get_token ~webhook_secret ()
+
+let get_token t =
+  Eio.Mutex.use_rw ~protect:false t.token_lock @@ fun () ->
+  let now = Unix.gettimeofday () in
+  match t.token with
+  | { token; expiry = None } -> token
+  | { token; expiry = Some expiry } when now < expiry -> token
+  | _ ->
+    Log.info (fun f -> f "Getting API token");
+    let token =
+      try t.get_token ()
+      with ex ->
+        Log.warn (fun f -> f "Error getting GitLab token: %a" Fmt.exn ex);
+        let token = Error (`Msg "Failed to get GitLab token") in
+        let expiry = Some (now +. 60.0) in
+        {token; expiry}
+    in
+    t.token <- token;
+    token.token
+
+let await_event ~owner_name =
+  let cond, mutex = webhook_entry owner_name in
+  Eio.Mutex.use_ro mutex (fun () ->
+    Eio.Condition.await cond mutex)
+
 (* Get latest Git ref for the default branch in GitLab. *)
 let get_default_ref t (repo_id : Repo_id.t) =
   let prefix = "refs/heads/" in
@@ -368,14 +441,14 @@ let make_head_commit_monitor t repo =
   let watch refresh =
     let owner_name = Fmt.str "%a" Repo_id.to_git repo in
     let stop = ref false in
-    Eio.Fiber.fork_daemon ~sw:t.sw (fun () ->
+    Eio.Fiber.fork_daemon ~sw:t.caps.sw (fun () ->
       let rec aux () =
         if !stop then `Stop_daemon
         else begin
           (try
              await_event ~owner_name;
              refresh ();
-             Eio.Time.sleep t.clock 10.0   (* Limit updates to 1 per 10 seconds *)
+             Eio.Time.sleep t.caps.clock 10.0   (* Limit updates to 1 per 10 seconds *)
            with ex ->
              Log.err (fun f -> f "head_commit thread failed: %a" Fmt.exn ex));
           aux ()
@@ -389,7 +462,7 @@ let make_head_commit_monitor t repo =
       Eio.Condition.broadcast cond
   in
   let pp f = Fmt.pf f "Watch %a default ref head" Repo_id.pp repo in
-  Current.Monitor.create ~sw:t.sw ~read ~watch ~pp
+  Current.Monitor.create ~sw:t.caps.sw ~read ~watch ~pp
 
 let head_commit t repo =
   Current.component "%a head" Repo_id.pp repo |>
@@ -405,75 +478,6 @@ let head_commit t repo =
   Current.Monitor.get monitor
 
 module Commit = struct
-  module Set_status = struct
-    let id = "gitlab-set-status"
-
-    type nonrec t = t
-
-    module Key = struct
-      type t = {
-        commit : Commit_id.t;
-        context : string;
-      }
-
-      let to_json { commit; context } =
-        `Assoc [
-          "commit", `String (Commit_id.digest commit);
-          "context", `String context;
-        ]
-
-      let digest t = Yojson.Safe.to_string @@ to_json t
-    end
-
-    module Value = Status
-
-    module Outcome = Current.Unit
-
-    let auto_cancel = true
-
-    let pp f ({ Key.commit; context }, status) =
-      Fmt.pf f "Set %a/%s to@ %a"
-        Commit_id.pp commit
-        context
-        Value.pp status
-
-    let publish t job key (status : Value.t) =
-      let state_to_gitlab = function
-        | `Cancelled -> `Cancelled
-        | `Failure -> `Failed
-        | `Running -> `Running
-        | `Pending -> `Pending
-        | `Success -> `Success
-      in
-      Current.Job.start job ~pool ~level:Current.Level.Above_average;
-      let { Key.commit; context } = key in
-      match get_token t with
-      | Error (`Msg m) -> failwith m
-      | Ok token ->
-        (try
-           let sha = commit.Commit_id.hash in
-           let project_id = commit.repo.project_id in
-           let new_status : Gitlab_types_t.new_status =
-             { state = state_to_gitlab status.Status.state
-             ; name = Some context
-             ; target_url = Option.map Uri.to_string status.Status.url
-             ; ref_name = None
-             ; description = None
-             ; coverage = None
-             ; pipeline_id = None
-             }
-           in
-           let _ = Gl.set_commit_status ~http:t.http ~token ~project_id ~sha new_status in
-           Ok ()
-         with ex ->
-           Log.err (fun f -> f "@[<v2>%a failed: %a@]"
-                        pp (key, status)
-                        Fmt.exn ex);
-           Error (`Msg (Fmt.str "Failed to set GitLab status %a" Fmt.exn ex)))
-  end
-
-  module Set_status_cache = Current_cache.Output(Set_status)
-
   type t = commit
 
   let uri (_, commit) = Commit_id.uri commit
@@ -498,7 +502,12 @@ module Commit = struct
     Current.component "set_status" |>
     let> (t, commit) = commit
     and> status = status in
-    Set_status_cache.set t {Set_status.Key.commit; context} status
+    let op = {
+      Commit_set_status.http = t.http;
+      get_token_now = (fun () -> get_token t);
+    } in
+    Commit_set_status_cache.set t.commit_set_status_cache op
+      {Commit_set_status.Key.commit; context} status
 
   let mr_name (_, id) = Commit_id.mr_name id
 
@@ -572,14 +581,14 @@ let make_refs_monitor t repo =
   let watch refresh =
     let owner_name = Fmt.str "%a" Repo_id.to_git repo in
     let stop = ref false in
-    Eio.Fiber.fork_daemon ~sw:t.sw (fun () ->
+    Eio.Fiber.fork_daemon ~sw:t.caps.sw (fun () ->
       let rec aux () =
         if !stop then `Stop_daemon
         else begin
           (try
              await_event ~owner_name;
              refresh ();
-             Eio.Time.sleep t.clock 10.0   (* Limit updates to 1 per 10 seconds *)
+             Eio.Time.sleep t.caps.clock 10.0   (* Limit updates to 1 per 10 seconds *)
            with ex ->
              Log.err (fun f -> f "refs thread failed: %a" Fmt.exn ex));
           aux ()
@@ -593,7 +602,7 @@ let make_refs_monitor t repo =
       Eio.Condition.broadcast cond
   in
   let pp f = Fmt.pf f "Watch %a CI refs" Repo_id.pp repo in
-  Current.Monitor.create ~sw:t.sw ~read ~watch ~pp
+  Current.Monitor.create ~sw:t.caps.sw ~read ~watch ~pp
 
 let refs t repo =
   Current.Monitor.get (
@@ -758,9 +767,10 @@ let make_config token_file webhook_secret_file =
   { token = String.trim (read_file token_file);
     webhook_secret = String.trim (read_file webhook_secret_file) }
 
-let create ~sw ~net ~clock { token; webhook_secret } =
+let create ~engine ~net { token; webhook_secret } =
+  let caps = Current_cache.caps_of_engine engine in
   let http = Current_http.create ~net in
-  of_oauth ~sw ~clock ~http ~token ~webhook_secret
+  of_oauth ~caps ~http ~token ~webhook_secret
 
 let cmdliner =
   Term.(const make_config $ token_file $ webhook_secret_file)

@@ -186,11 +186,10 @@ module Api : sig
   (** Command-line options to generate a GitLab configuration. *)
 
   val create :
-    sw:Eio.Switch.t ->
+    engine:Current.Engine.t ->
     net:[`Generic | `Unix] Eio.Net.ty Eio.Resource.t ->
-    clock:float Eio.Time.clock_ty Eio.Resource.t ->
     config -> t
-  (** [create ~sw ~net ~clock config] activates [config] inside the engine's
+  (** [create ~engine ~net config] activates [config] inside the engine's
       Eio scope. *)
 end
 

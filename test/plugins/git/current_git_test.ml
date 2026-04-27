@@ -58,11 +58,24 @@ end
 
 module C = Current_cache.Make(Clone)
 
+(* Driver.test sets this on engine startup so [fetch] has a cache instance
+   to use. *)
+let cache_ref : C.t option ref = ref None
+let set_cache c = cache_ref := Some c
+let cache () =
+  match !cache_ref with
+  | Some c -> c
+  | None -> failwith "Driver must call set_cache before fetch"
+
+let make_cache ~engine =
+  set_cache (C.create ~caps:(Current_cache.caps_of_engine engine))
+
 let fetch c =
   Current.component "fetch" |>
   let> c = c in
-  C.get Clone.No_context c
+  C.get (cache ()) Clone.No_context c
 
 let reset () =
   state := RepoMap.empty;
-  C.reset ~db:true
+  Current_cache.Db.drop_all "git-clone";
+  cache_ref := None

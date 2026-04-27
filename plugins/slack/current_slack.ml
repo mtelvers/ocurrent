@@ -2,10 +2,19 @@ open Current.Syntax
 
 module PC = Current_cache.Output(Post)
 
-type channel = Post.t
-let channel ~net uri = { Post.uri; http = Current_http.create ~net }
+type t = {
+  http : Current_http.t;
+  cache : PC.t;
+}
 
-let post channel ~key message =
+let create ~engine ~net =
+  let caps = Current_cache.caps_of_engine engine in
+  { http = Current_http.create ~net; cache = PC.create ~caps }
+
+type channel = Post.t
+let channel t uri = { Post.uri; http = t.http }
+
+let post t channel ~key message =
   Current.component "post" |>
   let> message = message in
-  PC.set channel key message
+  PC.set t.cache channel key message

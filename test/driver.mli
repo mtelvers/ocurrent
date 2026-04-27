@@ -3,14 +3,18 @@ val init_logging : unit -> unit
 val test :
   Eio_unix.Stdenv.base ->
   ?config:Current.Config.t ->
+  ?clock:Eio_mock.Clock.t ->
   ?final_stats:Current_term.S.stats ->
   name:string ->
-  (unit -> unit Current.t) ->
+  (Current.Engine.t -> unit -> unit Current.t) ->
   (int -> unit) ->
   unit
-(** [test env ~name pipeline actions] runs [pipeline]. After each iteration,
-    it calls [actions i] where [i] is the number of the next step ([1] on the
-    first call). If [actions i] raises [Exit] then the tests finish. *)
+(** [test env ~name pipeline_factory actions] runs the engine, calling
+    [pipeline_factory engine] once to obtain the actual pipeline (so the
+    test can build cache instances from [engine]'s caps). After each
+    iteration, it calls [actions i] where [i] is the number of the next
+    step ([1] on the first call). If [actions i] raises [Exit] the test
+    finishes. [?clock] overrides the engine's clock with a mock. *)
 
 val cancel : string -> unit
 (** [cancel msg] cancels the job named [msg]. *)

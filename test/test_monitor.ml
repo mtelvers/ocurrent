@@ -158,7 +158,7 @@ let basic env =
     Eio.Switch.run (fun sw ->
       monitor := Some (Current.Monitor.create ~sw ~read ~watch ~pp);
       let _engine : Current.Engine.t =
-        Current.Engine.create ~sw ~env test_pipeline ~trace:(trace step)
+        Current.Engine.create ~sw ~env (fun _engine -> test_pipeline ()) ~trace:(trace step)
       in
       Eio.Fiber.await_cancel ())
   with Exit -> ()

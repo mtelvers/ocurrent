@@ -29,6 +29,10 @@ val set_engine_sw : Eio.Switch.t -> unit
 (** Test plumbing: the mock forks image-pull monitors on this switch.
     {!Driver.test} calls this once it has the engine's switch. *)
 
+val make_caches : engine:Current.Engine.t -> unit
+(** Test plumbing: build the per-engine cache instances and stash them
+    for {!run}/{!push} to read. *)
+
 val reset : unit -> unit
 (** Reset state for tests. *)
 

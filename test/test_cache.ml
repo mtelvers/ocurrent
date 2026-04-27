@@ -30,10 +30,10 @@ end
 
 module BC = Current_cache.Make(Build)
 
-let get ?schedule builds x =
+let get bc ?schedule builds x =
   Current.component "get %s" x |>
   let> () = Current.return () in
-  BC.get ?schedule builds x
+  BC.get bc ?schedule builds x
 
 let pp_error f (`Msg m) = Fmt.string f m
 
@@ -48,49 +48,34 @@ let disk_cache () =
 
 let database = Alcotest.(list string)
 
-module Clock = struct
-  type pending = { end_time : float; resolve : unit Eio.Promise.u }
-
-  type t = {
-    mutable now : float;
-    mutable sleeping : pending list;
-  }
-
-  let create () =
-    let t = { now = 0.0; sleeping = [] } in
-    Current.Job.timestamp := (fun () -> t.now);
-    Current.Job.sleep := (fun d ->
-        let end_time = d +. t.now in
-        if t.now >= end_time then ()
-        else
-          let p, resolve = Eio.Promise.create () in
-          t.sleeping <- { end_time; resolve } :: t.sleeping;
-          Logs.info (fun f -> f "sleep until %.0f (now %.0f)" end_time t.now);
-          Eio.Promise.await p);
-    t
-
-  let set t now =
-    t.now <- now;
-    let fire, wait = List.partition (fun { end_time; _ } -> now >= end_time) t.sleeping in
-    t.sleeping <- wait;
-    List.iter (fun { resolve; _ } -> Eio.Promise.resolve resolve ()) fire
-end
+(* All cache tests share the [test-build] / [publish] / [latched] tables so
+   we drop them at the start of each test. The mock clock is a fresh one
+   per test, passed to {!Engine.create} via [?clock]. *)
+let mock_clock () =
+  let c = Eio_mock.Clock.make () in
+  Eio_mock.Clock.set_time c 0.0;
+  c
 
 let basic env =
   let result = ref "none" in
-  let pipeline builds () =
-    let+ x = get builds "a" in
+  let bc_ref = ref None in
+  let pipeline ~bc builds () =
+    let+ x = get bc builds "a" in
     result := x
   in
-  BC.reset ~db:true;
-  let clock = Clock.create () in
+  Current_cache.Db.drop_all "test-build";
+  let clock = mock_clock () in
   Alcotest.check database "Disk store initially empty" [] @@ disk_cache ();
   let builds = Build.create () in
-  Driver.test env ~name:"cache" (pipeline builds) @@ function
+  Driver.test env ~name:"cache" ~clock (fun engine ->
+    let bc = BC.create ~caps:(Current_cache.caps_of_engine engine) in
+    bc_ref := Some bc;
+    pipeline ~bc builds
+  ) @@ function
   | 1 ->
     let b = Builds.find "a" !builds in
     builds := Builds.remove "a" !builds;
-    Clock.set clock 1.0;
+    Eio_mock.Clock.set_time clock 1.0;
     Eio.Promise.resolve b @@ Ok "done"
   | 2 ->
     Alcotest.(check string) "Result correct" "done" !result;
@@ -115,33 +100,36 @@ let expires env =
   let result = ref (Error (`Msg ("uninitialised"))) in
   let five_s = Current_cache.Schedule.v ~valid_for:(Duration.of_sec 5) () in
   let ten_s = Current_cache.Schedule.v ~valid_for:(Duration.of_sec 10) () in
-  let pipeline builds () =
+  let pipeline ~bc builds () =
     Current.state (
-      let+ x = get ~schedule:ten_s builds "a"
-      and+ y = get ~schedule:five_s builds "a"
+      let+ x = get bc ~schedule:ten_s builds "a"
+      and+ y = get bc ~schedule:five_s builds "a"
       in
       Fmt.str "%s,%s" x y
     )
     |> Current.map (fun x -> result := x)
   in
-  BC.reset ~db:true;
-  let clock = Clock.create () in
+  Current_cache.Db.drop_all "test-build";
+  let clock = mock_clock () in
   Alcotest.check database "Disk store initially empty" [] @@ disk_cache ();
   let builds = Build.create () in
-  Driver.test env ~name:"cache" (pipeline builds) @@ function
+  Driver.test env ~name:"cache" ~clock (fun engine ->
+    let bc = BC.create ~caps:(Current_cache.caps_of_engine engine) in
+    pipeline ~bc builds
+  ) @@ function
   | 1 ->
     let b = Builds.find "a" !builds in
     builds := Builds.remove "a" !builds;
-    Clock.set clock 1.0;
+    Eio_mock.Clock.set_time clock 1.0;
     Eio.Promise.resolve b @@ Ok "done"
   | 2 ->
     Alcotest.check database "Result stored" ["done 0/0/1 +0"] @@ disk_cache ();
     Alcotest.(check result_t) "Result correct" (Ok "done,done") !result;
-    Clock.set clock 7.0
+    Eio_mock.Clock.set_time clock 7.0
   | 3 ->
     Alcotest.(check result_t) "Result latched" (Ok "done,done") !result;
     let b = Builds.find "a" !builds in
-    Clock.set clock 8.0;
+    Eio_mock.Clock.set_time clock 8.0;
     Alcotest.check database "Disk store not invalidated" ["done 0/0/1 +0"] @@ disk_cache ();
     Eio.Promise.resolve b @@ Ok "rebuild"
   | _ ->
@@ -155,39 +143,37 @@ let wanted = Bool_var.create ~name:"wanted" (Ok true)
 let autocancel env =
   let result = ref "none" in
   let builds = Build.create () in
-  let pipeline () =
+  let pipeline ~bc () =
     let* wanted = Bool_var.get wanted in
     let+ r =
-      if wanted then get builds "a"
+      if wanted then get bc builds "a"
       else Current.return "unwanted"
     in
     result := r
   in
-  BC.reset ~db:true;
-  let clock = Clock.create () in
+  Current_cache.Db.drop_all "test-build";
+  let clock = mock_clock () in
   Alcotest.check database "Disk store initially empty" [] @@ disk_cache ();
-  Driver.test env ~name:"cache" pipeline @@ function
+  Driver.test env ~name:"cache" ~clock (fun engine ->
+    let bc = BC.create ~caps:(Current_cache.caps_of_engine engine) in
+    pipeline ~bc
+  ) @@ function
   | 1 ->
     Alcotest.(check string) "Initially pending" "none" !result;
-    (* This will turn off the switch. However, our test code ignores that. *)
     Bool_var.set wanted @@ Ok false
   | 2 ->
     Alcotest.(check string) "Not wanted" "unwanted" !result;
-    (* Re-enable it before the old build has finished cancelling. *)
     Bool_var.set wanted @@ Ok true
   | 3 ->
     let b = Builds.find "a" !builds in
     builds := Builds.remove "a" !builds;
-    Clock.set clock 1.0;
-    (* The original build completes, but we ignore it as cancelled and start a replacement
-       build. *)
+    Eio_mock.Clock.set_time clock 1.0;
     Eio.Promise.resolve b @@ Ok "old-build"
   | 4 ->
     Alcotest.(check string) "No update yet" "unwanted" !result;
     let b = Builds.find "a" !builds in
     builds := Builds.remove "a" !builds;
-    Clock.set clock 2.0;
-    (* The replacement build completes. *)
+    Eio_mock.Clock.set_time clock 2.0;
     Eio.Promise.resolve b @@ Ok "new-build"
   | 5 ->
     Alcotest.(check string) "Rebuild done" "new-build" !result;
@@ -231,11 +217,9 @@ module Publish = struct
       ~on_cancel:(fun reason ->
         Logs.info (fun f -> f "Cancelling: %s" reason);
         t.state <- "cancelled";
-        complete t (Error (`Msg reason))
-      )
+        complete t (Error (`Msg reason)))
 
-  let pp f (k, v) =
-    Fmt.pf f "Set %s to %s" k v
+  let pp f (k, v) = Fmt.pf f "Set %s to %s" k v
 
   let auto_cancel = false
 
@@ -249,17 +233,20 @@ let input = V.create ~name:"input" @@ Ok "bar"
 
 module OC = Current_cache.Output(Publish)
 
-let set p k v =
+let set oc p k v =
   Current.component "set" |>
   let> v = v in
-  OC.set p k v
+  OC.set oc p k v
 
 let output env =
   V.set input @@ Ok "bar";
-  OC.reset ~db:true;
+  Current_cache.Db.drop_all "publish";
   let p = Publish.create () in
-  let pipeline () = V.get input |> set p "foo" in
-  Driver.test env ~name:"cache.output" pipeline @@ function
+  let pipeline ~oc () = V.get input |> set oc p "foo" in
+  Driver.test env ~name:"cache.output" (fun engine ->
+    let oc = OC.create ~caps:(Current_cache.caps_of_engine engine) in
+    pipeline ~oc
+  ) @@ function
   | 1 ->
     Alcotest.(check string) "Publish has started" "init-changing" p.Publish.state;
     Publish.complete p @@ Ok ();
@@ -289,17 +276,20 @@ end
 
 module OC2 = Current_cache.Output(Publish2)
 
-let set2 p k v =
+let set2 oc2 p k v =
   Current.component "set2" |>
   let> v = v in
-  OC2.set p k v
+  OC2.set oc2 p k v
 
 let output_autocancel env =
   V.set input @@ Ok "bar";
-  OC2.reset ~db:true;
+  Current_cache.Db.drop_all "publish2";
   let p = Publish2.create () in
-  let pipeline () = V.get input |> set2 p "foo" in
-  Driver.test env ~name:"cache.output_autocancel" pipeline @@ function
+  let pipeline ~oc2 () = V.get input |> set2 oc2 p "foo" in
+  Driver.test env ~name:"cache.output_autocancel" (fun engine ->
+    let oc2 = OC2.create ~caps:(Current_cache.caps_of_engine engine) in
+    pipeline ~oc2
+  ) @@ function
   | 1 ->
     Alcotest.(check string) "Publish has started" "init-changing" p.Publish.state;
     Publish.complete p @@ Ok ();
@@ -310,8 +300,6 @@ let output_autocancel env =
     Alcotest.(check string) "Changing to baz" "bar-changing" p.Publish.state;
     V.set input @@ Ok "new";
   | 4 ->
-    (* At this point, we've noticed that the baz operation is no longer needed and sent a cancellation request.
-       The job is over, but there's a pause because we re-evaluate. *)
     ()
   | 5 ->
     Alcotest.(check string) "Changed during publish" "cancelled-changing" p.Publish.state;
@@ -329,10 +317,13 @@ let output_autocancel env =
     assert false
 
 let output_retry env =
-  OC2.reset ~db:true;
+  Current_cache.Db.drop_all "publish2";
   let p = Publish2.create () in
-  let pipeline () = set2 p "foo" (Current.return "value") in
-  Driver.test env ~name:"cache.output_retry" pipeline @@ function
+  let pipeline ~oc2 () = set2 oc2 p "foo" (Current.return "value") in
+  Driver.test env ~name:"cache.output_retry" (fun engine ->
+    let oc2 = OC2.create ~caps:(Current_cache.caps_of_engine engine) in
+    pipeline ~oc2
+  ) @@ function
   | 1 ->
     Alcotest.(check string) "Publish has started" "init-changing" p.Publish.state;
     Publish.complete p @@ Error (`Msg "Failed")
@@ -348,17 +339,18 @@ let output_retry env =
     assert false
 
 let output_retry_new env =
-  OC.reset ~db:true;
+  Current_cache.Db.drop_all "publish";
   let p = Publish.create () in
   V.set input @@ Ok "1";
-  let pipeline () = set p "foo" (V.get input) in
-  Driver.test env ~name:"cache.output_retry_new" pipeline @@ function
+  let pipeline ~oc () = set oc p "foo" (V.get input) in
+  Driver.test env ~name:"cache.output_retry_new" (fun engine ->
+    let oc = OC.create ~caps:(Current_cache.caps_of_engine engine) in
+    pipeline ~oc
+  ) @@ function
   | 1 ->
     Alcotest.(check string) "Publish has started" "init-changing" p.Publish.state;
-    (* We change our mind about the value while still setting the old one. *)
     V.set input @@ Ok "2";
   | 2 ->
-    (* The original build fails. *)
     Publish.complete p @@ Error (`Msg "Failed")
   | 3 ->
     Alcotest.(check string) "Publish has restarted" "init-changing-changing" p.Publish.state;
@@ -400,26 +392,29 @@ end
 
 module LC = Current_cache.Generic(Latched)
 
-let build p commit base =
+let build lc p commit base =
   Current.component "build" |>
   let> commit = commit
   and> base = base in
-  LC.run p commit base
+  LC.run lc p commit base
 
 let commit = V.create ~name:"commit" @@ Error (`Msg "(init)")
 let base = V.create ~name:"base" @@ Error (`Msg "(init)")
 
 let latched env =
-  LC.reset ~db:true;
+  Current_cache.Db.drop_all "latched";
   let p = Latched.create () in
   V.set base @@ Ok "alpine:3.10";
   V.set commit @@ Ok "r1";
   let result = ref (Error (`Msg ("uninitialised"))) in
-  let pipeline () =
-    let+ st = Current.state @@ build p (V.get commit) (V.get base) in
+  let pipeline ~lc () =
+    let+ st = Current.state @@ build lc p (V.get commit) (V.get base) in
     result := st
   in
-  Driver.test env ~name:"cache.latched" pipeline @@ function
+  Driver.test env ~name:"cache.latched" (fun engine ->
+    let lc = LC.create ~caps:(Current_cache.caps_of_engine engine) in
+    pipeline ~lc
+  ) @@ function
   | 1 ->
     Alcotest.(check result_t) "Op has started" (Error (`Active `Running)) !result;
     Eio.Condition.broadcast Latched.cond;
@@ -427,14 +422,12 @@ let latched env =
     Alcotest.(check result_t) "3.10 ready" (Ok "alpine:3.10-outcome") !result;
     Alcotest.(check (option string)) "3.10 result" (Some "alpine:3.10-done") (Hashtbl.find_opt p "r1");
     V.set base @@ Ok "alpine:3.11";
-    (* Changing the base latches the result *)
   | 3 ->
     Alcotest.(check result_t) "3.10 latched" (Ok "alpine:3.10-outcome") !result;
     Eio.Condition.broadcast Latched.cond;
   | 4 ->
     Alcotest.(check result_t) "3.11 ready" (Ok "alpine:3.11-outcome") !result;
     Alcotest.(check (option string)) "3.11 result" (Some "alpine:3.11-done") (Hashtbl.find_opt p "r1");
-    (* Changing the commit does not latch *)
     V.set commit @@ Ok "r2";
   | 5 ->
     Alcotest.(check result_t) "Not latched" (Error (`Active `Running)) !result;
@@ -447,16 +440,19 @@ let latched env =
     assert false
 
 let latched_autocancel env =
-  LC.reset ~db:true;
+  Current_cache.Db.drop_all "latched";
   let p = Latched.create () in
   V.set base @@ Ok "alpine:3.10";
   V.set commit @@ Ok "r1";
   let result = ref (Error (`Msg ("uninitialised"))) in
-  let pipeline () =
-    let+ st = Current.state @@ build p (V.get commit) (V.get base) in
+  let pipeline ~lc () =
+    let+ st = Current.state @@ build lc p (V.get commit) (V.get base) in
     result := st
   in
-  Driver.test env ~name:"cache.latched-autocancel" pipeline @@ function
+  Driver.test env ~name:"cache.latched-autocancel" (fun engine ->
+    let lc = LC.create ~caps:(Current_cache.caps_of_engine engine) in
+    pipeline ~lc
+  ) @@ function
   | 1 ->
     Alcotest.(check result_t) "Op has started" (Error (`Active `Running)) !result;
     Eio.Condition.broadcast Latched.cond;
@@ -464,17 +460,15 @@ let latched_autocancel env =
     Alcotest.(check result_t) "3.10 ready" (Ok "alpine:3.10-outcome") !result;
     Alcotest.(check (option string)) "3.10 result" (Some "alpine:3.10-done") (Hashtbl.find_opt p "r1");
     V.set base @@ Ok "alpine:3.11";
-    (* Changing the base latches the result *)
   | 3 ->
     Alcotest.(check result_t) "3.10 latched" (Ok "alpine:3.10-outcome") !result;
     V.set base @@ Ok "alpine:3.12";
-    (* Changing the base again auto-cancels, still latching the result *)
   | 4 ->
     Alcotest.(check result_t) "3.10 latched" (Ok "alpine:3.10-outcome") !result;
-    Eio.Condition.broadcast Latched.cond;    (* Cancel takes effect *)
+    Eio.Condition.broadcast Latched.cond;
   | 5 ->
     Alcotest.(check result_t) "3.10 latched" (Ok "alpine:3.10-outcome") !result;
-    Eio.Condition.broadcast Latched.cond;    (* Second update completes *)
+    Eio.Condition.broadcast Latched.cond;
   | 6 ->
     Alcotest.(check result_t) "3.12 ready" (Ok "alpine:3.12-outcome") !result;
     Alcotest.(check (option string)) "3.12 result" (Some "alpine:3.12-done") (Hashtbl.find_opt p "r1");
@@ -483,40 +477,41 @@ let latched_autocancel env =
     assert false
 
 let clear_error env =
-  LC.reset ~db:true;
+  Current_cache.Db.drop_all "latched";
   let p = Latched.create () in
   V.set base @@ Ok "";
   V.set commit @@ Ok "r1";
   let result = ref (Error (`Msg ("uninitialised"))) in
-  let pipeline () =
-    let+ st = Current.state @@ build p (V.get commit) (V.get base) in
+  let lc_ref = ref None in
+  let pipeline ~lc () =
+    let+ st = Current.state @@ build lc p (V.get commit) (V.get base) in
     result := st
   in
-  Driver.test env ~name:"cache.clear_error" pipeline @@ function
+  Driver.test env ~name:"cache.clear_error" (fun engine ->
+    let lc = LC.create ~caps:(Current_cache.caps_of_engine engine) in
+    lc_ref := Some lc;
+    pipeline ~lc
+  ) @@ function
   | 1 ->
     Alcotest.(check result_t) "Op has started" (Error (`Active `Running)) !result;
     Eio.Condition.broadcast Latched.cond;
   | 2 ->
     Alcotest.(check result_t) "Bad base failed" (Error (`Msg "bad-base")) !result;
     V.set base @@ Ok "alpine:3.11";
-    (* Changing the base latches the result *)
   | 3 ->
     Alcotest.(check result_t) "Failure latched" (Error (`Msg "bad-base")) !result;
     Eio.Condition.broadcast Latched.cond;
   | 4 ->
     Alcotest.(check result_t) "3.11 ready" (Ok "alpine:3.11-outcome") !result;
     V.set base @@ Ok "";
-    (* Generate the error state again *)
   | 5 ->
     Alcotest.(check result_t) "3.11 still ready" (Ok "alpine:3.11-outcome") !result;
     Eio.Condition.broadcast Latched.cond;
   | 6 ->
     Alcotest.(check result_t) "Bad base failed" (Error (`Msg "bad-base")) !result;
-    (* This time, reset the cache (simulating a restart of the service). *)
-    LC.reset ~db:false;
+    (match !lc_ref with Some lc -> LC.reset lc ~db:false | None -> ());
     V.set base @@ Ok "alpine:3.11";
   | 7 ->
-    (* Failure is latched, but a rebuild is in progress: *)
     Alcotest.(check result_t) "Bad base failed" (Error (`Msg "bad-base")) !result;
     Eio.Condition.broadcast Latched.cond;
   | 8 ->

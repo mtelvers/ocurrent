@@ -104,7 +104,7 @@ end
 (* Build an Eio flow source that streams the log response body:
    the template header, then the log content (polling for more while the
    job is still running), then the template footer. *)
-let log_body_source ctx ~actions ~job_id ~log:path =
+let log_body_source ctx ~engine ~actions ~job_id ~log:path =
   let ansi = Ansi.create () in
   let action op = a_action (Fmt.str "/job/%s/%s" job_id op) in
   let csrf = Context.csrf ctx in
@@ -140,7 +140,8 @@ let log_body_source ctx ~actions ~job_id ~log:path =
     else a ~a:[a_href (Fmt.str "/job/%s" id)] [label]
   in
   let history =
-    match Current_cache.Db.history ~limit:10 ~job_id with
+    let registry = Current.Engine.cache_registry engine in
+    match Current_cache.Db.history ~registry ~limit:10 ~job_id with
     | None, [] -> []
     | current, past ->
       let items = past |> List.map (fun entry ->
@@ -199,7 +200,7 @@ let job ~engine ~job_id = object
     match Current.Job.log_path job_id with
     | Error (`Msg msg) -> Context.respond_error ctx `Bad_request msg
     | Ok path ->
-      let body = log_body_source ctx ~actions ~job_id ~log:path in
+      let body = log_body_source ctx ~engine ~actions ~job_id ~log:path in
       let headers =
         (* Otherwise, an nginx reverse proxy will wait for the whole log before sending anything. *)
         Cohttp.Header.init_with "X-Accel-Buffering" "no"

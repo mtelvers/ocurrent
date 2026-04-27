@@ -15,6 +15,7 @@
   current_opam_test
   duration
   eio
+  eio.mock
   eio_main
   fmt
   fmt.tty

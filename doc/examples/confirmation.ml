@@ -35,10 +35,10 @@ end
 (* We create the cache using the OCurrent function. *)
 module Show_cache = Current_cache.Make(Show)
 
-let show hash =
+let show ~cache hash =
     Current.component "show" |>
     let> key = hash in
-    Show_cache.get Show.No_context key
+    Show_cache.get cache Show.No_context key
 
 let () = Prometheus_unix.Logging.init ()
 
@@ -46,10 +46,10 @@ let () = Prometheus_unix.Logging.init ()
     1. Fetch a commit
     2. Wait for confirmation
     3. Display the commit once the stage is confirmed. *)
-let pipeline ~repo () =
+let pipeline ~cache ~repo () =
     let commit = Git.Local.head_commit repo in
     let hash = Current.map Git.Commit.hash commit in
-    show hash
+    show ~cache hash
 
 let main mode repo =
     (* Here, we set the config to request a confirmation above job with [Average] value. *)
@@ -59,7 +59,11 @@ let main mode repo =
     let net = Eio.Stdenv.net env in
     let process_mgr = Eio.Stdenv.process_mgr env in
     let repo = Git.Local.v ~sw ~process_mgr (Fpath.v repo) in
-    let engine = Current.Engine.create ~sw ~env ~config (pipeline ~repo) in
+    let engine =
+      Current.Engine.create ~sw ~env ~config (fun engine ->
+        let cache = Show_cache.create ~caps:(Current_cache.caps_of_engine engine) in
+        pipeline ~cache ~repo ())
+    in
     let site = Current_web.Site.(v ~has_role:allow_all) ~name:program_name (Current_web.routes engine) in
     Current_web.run ~sw ~net ~mode site
 

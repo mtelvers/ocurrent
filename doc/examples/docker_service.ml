@@ -22,10 +22,10 @@ let weekly = Current_cache.Schedule.v ~valid_for:(Duration.of_day 7) ()
 
 (* Run "docker build" on the latest commit in Git repository [repo]
    at least once a week, and redeploy [service] on changes. *)
-let pipeline ~repo ~service () =
+let pipeline ~docker ~repo ~service () =
   let src = Git.Local.head_commit repo in
-  let image = Docker.build ~schedule:weekly ~pull:true (`Git src) in
-  Docker.service ~name:service ~image ()
+  let image = Docker.build docker ~schedule:weekly ~pull:true (`Git src) in
+  Docker.service docker ~name:service ~image ()
 
 let main config mode service repo =
   Eio_main.run @@ fun env ->
@@ -33,7 +33,12 @@ let main config mode service repo =
   let net = Eio.Stdenv.net env in
   let process_mgr = Eio.Stdenv.process_mgr env in
   let repo = Git.Local.v ~sw ~process_mgr (Fpath.v repo) in
-  let engine = Current.Engine.create ~sw ~env ~config (pipeline ~repo ~service) in
+  let engine =
+    Current.Engine.create ~sw ~env ~config (fun engine ->
+      let git = Current_git.create ~engine in
+      let docker = Docker.create ~engine ~git in
+      pipeline ~docker ~repo ~service ())
+  in
   let site = Current_web.Site.(v ~has_role:allow_all) ~name:program_name (Current_web.routes engine) in
   Current_web.run ~sw ~net ~mode site
 

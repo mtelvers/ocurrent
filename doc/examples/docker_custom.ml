@@ -65,30 +65,36 @@ module Test_cache = Current_cache.Make(Test)
 module Docker = Current_docker.Default
 
 (* Test a Docker image by running it and then execing curl inside it. *)
-let test image =
+let test ~test_cache image =
   Current.component "test with@,@[<h>%a@]" Fmt.(list ~sep:sp string) Test.test_command |>
   let> image = image in
   let docker_context = Docker.docker_context in
   let image = Docker.Image.hash image |> Current_docker.Raw.Image.of_hash in
-  Test_cache.get Test.No_context { Test.Key.docker_context; image }
+  Test_cache.get test_cache Test.No_context { Test.Key.docker_context; image }
 
 (* Build a docker image with nginx and curl and then test it. *)
-let pipeline () =
+let pipeline ~docker ~test_cache () =
   let dockerfile =
-    let+ base = Docker.pull ~schedule:weekly "nginx" in
+    let+ base = Docker.pull docker ~schedule:weekly "nginx" in
     `Contents Dockerfile.(
         from (Docker.Image.hash base) @@
         run "apt-get update && apt-get install -y curl --no-install-recommends"
         |> string_of_t
       )
   in
-  test (Docker.build ~pull:false ~dockerfile `No_context)
+  test ~test_cache (Docker.build docker ~pull:false ~dockerfile `No_context)
 
 let main config mode =
   Eio_main.run @@ fun env ->
   Eio.Switch.run @@ fun sw ->
   let net = Eio.Stdenv.net env in
-  let engine = Current.Engine.create ~sw ~env ~config pipeline in
+  let engine =
+    Current.Engine.create ~sw ~env ~config (fun engine ->
+      let git = Current_git.create ~engine in
+      let docker = Docker.create ~engine ~git in
+      let test_cache = Test_cache.create ~caps:(Current_cache.caps_of_engine engine) in
+      pipeline ~docker ~test_cache ())
+  in
   let site = Current_web.Site.(v ~has_role:allow_all) ~name:program_name (Current_web.routes engine) in
   Current_web.run ~sw ~net ~mode site
 

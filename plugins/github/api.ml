@@ -374,15 +374,217 @@ module Monitors = Map.Make(Repo_key)
 
 type monitors = Repo_key.elt Monitors.t
 
+(* Lifted-out cache operations. [Op.t] is the small record that publish
+   actually needs — explicitly NOT [Api.t], so the cache type can be
+   referenced from {!t} below without a definitional cycle. The set_status
+   methods later construct an [Op.t] on demand from the [Api.t] in scope. *)
+
+module Check_run_set_status = struct
+  let id = "github-check-run-set-status"
+
+  type t = {
+    http : Current_http.t;
+    get_token_now : unit -> (string, [`Msg of string]) result;
+    app_id : string option;
+  }
+
+  module Key = struct
+    type t = {
+      commit : Commit_id.t;
+      check_name : string;
+    }
+
+    let to_json { commit; check_name } =
+      `Assoc [
+        "commit", `String (Commit_id.digest commit);
+        "check_name", `String check_name;
+      ]
+
+    let digest t = Yojson.Safe.to_string (to_json t)
+  end
+
+  module Value = CheckRunStatus
+  module Outcome = Current.Unit
+
+  let auto_cancel = true
+
+  let pp f ({ Key.commit; check_name }, status) =
+    Fmt.pf f "Set %a/%s to@ %a"
+      Commit_id.pp commit
+      check_name
+      Value.pp status
+
+  let publish op job key status =
+    Current.Job.start job ~pool ~level:Current.Level.Above_average;
+    match op.get_token_now () with
+    | Error (`Msg m) -> failwith m
+    | Ok token ->
+      let owner = key.Key.commit.owner in
+      let repo = key.Key.commit.repo in
+      let sha = key.Key.commit.hash in
+      let app_id = op.app_id in
+      let check_name = key.Key.check_name in
+      let headers =
+        Cohttp.Header.of_list [
+          "Authorization", "bearer " ^ token;
+          "Accept", "application/vnd.github+json";
+        ]
+      in
+      let check_run_base =
+        Fmt.str "https://api.github.com/repos/%s/%s/check-runs" owner repo
+      in
+      let fetch_check_run_id () =
+        let query =
+          ("check_name", [check_name]) ::
+          (match app_id with
+           | None -> []
+           | Some id -> ["app_id", [id]])
+        in
+        let uri =
+          Uri.with_query
+            (Uri.of_string
+               (Fmt.str "https://api.github.com/repos/%s/%s/commits/%s/check-runs"
+                  owner repo sha))
+            query
+        in
+        let resp, body = Current_http.get op.http ~headers uri in
+        match Cohttp.Response.status resp with
+        | `OK ->
+          let json = Yojson.Safe.from_string body in
+          begin match Yojson.Safe.Util.(json |> member "check_runs" |> to_list) with
+            | [] -> None
+            | first :: _ ->
+              let id =
+                match Yojson.Safe.Util.member "id" first with
+                | `Int i -> string_of_int i
+                | `Intlit s -> s
+                | _ -> Fmt.failwith "check-runs response: id not an integer"
+              in
+              Some id
+          end
+        | err ->
+          Fmt.failwith "list_check_runs_for_ref: %s@,%s"
+            (Cohttp.Code.string_of_status err) body
+      in
+      let create_check () =
+        let body =
+          `Assoc (("name", `String check_name)
+                  :: ("head_sha", `String sha)
+                  :: Value.json_items status)
+          |> Yojson.Safe.to_string
+        in
+        Log.debug (fun f -> f "create_check: %s" body);
+        let resp, resp_body = Current_http.post op.http ~headers ~body (Uri.of_string check_run_base) in
+        match Cohttp.Response.status resp with
+        | `Created -> ()
+        | err ->
+          Fmt.failwith "create_check_run: %s@,%s"
+            (Cohttp.Code.string_of_status err) resp_body
+      in
+      let update_check_run check_run_id =
+        let body = `Assoc (Value.json_items status) |> Yojson.Safe.to_string in
+        Log.debug (fun f -> f "update_check: %s" body);
+        let uri = Uri.of_string (check_run_base ^ "/" ^ check_run_id) in
+        let resp, resp_body = Current_http.patch op.http ~headers ~body uri in
+        match Cohttp.Response.status resp with
+        | `OK -> ()
+        | err ->
+          Fmt.failwith "update_check_run: %s@,%s"
+            (Cohttp.Code.string_of_status err) resp_body
+      in
+      (try
+         (match fetch_check_run_id () with
+          | None -> create_check ()
+          | Some id -> update_check_run id);
+         Ok ()
+       with ex ->
+         Log.info (fun f -> f "@[<v2>%a failed: %a@]"
+                      pp (key, status)
+                      Fmt.exn ex);
+         Error (`Msg "Failed to set GitHub status"))
+end
+
+module Check_run_set_status_cache = Current_cache.Output(Check_run_set_status)
+
+module Commit_set_status = struct
+  let id = "github-set-status"
+
+  type t = {
+    http : Current_http.t;
+    get_token_now : unit -> (string, [`Msg of string]) result;
+  }
+
+  module Key = struct
+    type t = {
+      commit : Commit_id.t;
+      context : string;
+    }
+
+    let to_json { commit; context } =
+      `Assoc [
+        "commit", `String (Commit_id.digest commit);
+        "context", `String context;
+      ]
+
+    let digest t = Yojson.Safe.to_string (to_json t)
+  end
+
+  module Value = Status
+  module Outcome = Current.Unit
+
+  let auto_cancel = true
+
+  let pp f ({ Key.commit; context }, status) =
+    Fmt.pf f "Set %a/%s to@ %a"
+      Commit_id.pp commit
+      context
+      Value.pp status
+
+  let publish op job key status =
+    Current.Job.start job ~pool ~level:Current.Level.Above_average;
+    let {Key.commit; context} = key in
+    let body = `Assoc (("context", `String context) :: Value.json_items status) in
+    match op.get_token_now () with
+    | Error (`Msg m) -> failwith m
+    | Ok token ->
+      let headers = Cohttp.Header.init_with "Authorization" ("bearer " ^ token) in
+      let uri = status_endpoint
+          ~owner_name:(Commit_id.owner_name commit)
+          ~commit:commit.Commit_id.hash
+      in
+      Current.Job.log job "@[<v2>POST %a:@,%a@]"
+        Uri.pp uri
+        (Yojson.Safe.pretty_print ~std:true) body;
+      let body = Yojson.Safe.to_string body in
+      (try
+         let resp, body = Current_http.post op.http ~headers ~body uri in
+         match Cohttp.Response.status resp with
+         | `Created -> Ok ()
+         | err ->
+           Log.warn (fun f -> f "@[<v2>%a failed: %s@,%s@]"
+                        pp (key, status)
+                        (Cohttp.Code.string_of_status err)
+                        body);
+           Error (`Msg "Failed to set GitHub status")
+       with ex ->
+         Log.warn (fun f -> f "@[<v2>%a failed: %a@]"
+                      pp (key, status)
+                      Fmt.exn ex);
+         Error (`Msg "Failed to set GitHub status"))
+end
+
+module Commit_set_status_cache = Current_cache.Output(Commit_set_status)
+
 type t = {
   account : string;          (* Prometheus label used to report points. *)
   get_token : unit -> token;
   app_id : string option;
   webhook_secret : string; (* Shared secret for validating webhooks from GitHub *)
   token_lock : Eio.Mutex.t;
-  sw : Eio.Switch.t;
-  clock : float Eio.Time.clock_ty Eio.Resource.t;
+  caps : Current_cache.caps;
   http : Current_http.t;
+  check_run_set_status_cache : Check_run_set_status_cache.t;
+  commit_set_status_cache : Commit_set_status_cache.t;
   mutable token : token;
   mutable monitors: monitors;
 }
@@ -393,23 +595,25 @@ and refs = {
 }
 
 let webhook_secret t = t.webhook_secret
-let sw t = t.sw
-let clock t = t.clock
+let sw t = t.caps.sw
+let clock t = t.caps.clock
 let http t = t.http
 
 let default_ref t = t.default_ref
 
 let all_refs t = t.all_refs
 
-let v ~sw ~clock ~http ~get_token ?app_id ~account ~webhook_secret () =
+let v ~caps ~http ~get_token ?app_id ~account ~webhook_secret () =
   let monitors = Monitors.empty in
   let token_lock = Eio.Mutex.create () in
   { get_token; token_lock; token = no_token; monitors; account; app_id; webhook_secret;
-    sw; clock; http }
+    caps; http;
+    check_run_set_status_cache = Check_run_set_status_cache.create ~caps;
+    commit_set_status_cache = Commit_set_status_cache.create ~caps }
 
-let of_oauth ~sw ~clock ~http ~token ~webhook_secret =
+let of_oauth ~caps ~http ~token ~webhook_secret =
   let get_token () = { token = Ok token; expiry = None} in
-  v ~sw ~clock ~http ~get_token ~account:"oauth" ~webhook_secret ()
+  v ~caps ~http ~get_token ~account:"oauth" ~webhook_secret ()
 
 let get_cached_token t =
   let now = Unix.gettimeofday () in
@@ -525,7 +729,7 @@ module Monitor (Query : GRAPHQL_QUERY) = struct
     let watch refresh =
       let owner_name = Printf.sprintf "%s/%s" repo.owner repo.name in
       let stop = ref false in
-      Eio.Fiber.fork_daemon ~sw:t.sw (fun () ->
+      Eio.Fiber.fork_daemon ~sw:t.caps.sw (fun () ->
         let rec aux () =
           if !stop then `Stop_daemon
           else begin
@@ -533,7 +737,7 @@ module Monitor (Query : GRAPHQL_QUERY) = struct
                await_event ~owner_name;
                Log.info (fun f -> f "Received webhook for owner/name: %s" owner_name);
                refresh ();
-               Eio.Time.sleep t.clock 10.0   (* Limit updates to 1 per 10 seconds *)
+               Eio.Time.sleep t.caps.clock 10.0   (* Limit updates to 1 per 10 seconds *)
              with ex ->
                Log.err (fun f -> f "%s thread failed: %a" Query.name Fmt.exn ex));
             aux ()
@@ -548,7 +752,7 @@ module Monitor (Query : GRAPHQL_QUERY) = struct
         Eio.Condition.broadcast cond
     in
     let pp f = Fmt.pf f "Watch %a %s" Repo_id.pp repo Query.name in
-    Current.Monitor.create ~sw:t.sw ~read ~watch ~pp
+    Current.Monitor.create ~sw:t.caps.sw ~read ~watch ~pp
 
   let get t repo =
     let monitor =
@@ -786,211 +990,23 @@ let head_of t repo (id: Ref.id) =
     | None -> Fmt.error_msg "No such ref %a/%a" Repo_id.pp repo Ref.pp_id id
 
 module CheckRun = struct
-  module Set_status = struct
-    let id = "github-check-run-set-status"
-
-    type nonrec t = t
-
-    module Key = struct
-      type t = {
-          commit : Commit_id.t;
-          check_name : string;
-        }
-
-      let to_json { commit; check_name } =
-        `Assoc [
-            "commit", `String (Commit_id.digest commit);
-            "check_name", `String check_name
-          ]
-
-      let digest t = Yojson.Safe.to_string (to_json t)
-    end
-
-    module Value = CheckRunStatus
-
-    module Outcome = Current.Unit
-
-    let auto_cancel = true
-
-    let pp f ({ Key.commit; check_name }, status) =
-      Fmt.pf f "Set %a/%s to@ %a"
-        Commit_id.pp commit
-        check_name
-        Value.pp status
-
-    let publish t job key status =
-      Current.Job.start job ~pool ~level:Current.Level.Above_average;
-      match get_token t with
-      | Error (`Msg m) -> failwith m
-      | Ok token ->
-         let owner = key.Key.commit.owner in
-         let repo = key.Key.commit.repo in
-         let sha = key.Key.commit.hash in
-         let app_id = t.app_id in
-         let check_name = key.Key.check_name in
-         let headers =
-           Cohttp.Header.of_list [
-             "Authorization", "bearer " ^ token;
-             "Accept", "application/vnd.github+json";
-           ]
-         in
-         let check_run_base =
-           Fmt.str "https://api.github.com/repos/%s/%s/check-runs" owner repo
-         in
-         (* GET /repos/:owner/:repo/commits/:sha/check-runs?check_name=...&app_id=...
-            Assuming a single check_run per app/sha/check_name, return the first. *)
-         let fetch_check_run_id () =
-           let query =
-             ("check_name", [check_name]) ::
-             (match app_id with
-              | None -> []
-              | Some id -> ["app_id", [id]])
-           in
-           let uri =
-             Uri.with_query
-               (Uri.of_string
-                  (Fmt.str "https://api.github.com/repos/%s/%s/commits/%s/check-runs"
-                     owner repo sha))
-               query
-           in
-           let resp, body = Current_http.get t.http ~headers uri in
-           match Cohttp.Response.status resp with
-           | `OK ->
-             let json = Yojson.Safe.from_string body in
-             begin match Yojson.Safe.Util.(json |> member "check_runs" |> to_list) with
-             | [] -> None
-             | first :: _ ->
-               let id =
-                 match Yojson.Safe.Util.member "id" first with
-                 | `Int i -> string_of_int i
-                 | `Intlit s -> s
-                 | _ -> Fmt.failwith "check-runs response: id not an integer"
-               in
-               Some id
-             end
-           | err ->
-             Fmt.failwith "list_check_runs_for_ref: %s@,%s"
-               (Cohttp.Code.string_of_status err) body
-         in
-         let create_check () =
-           let body =
-             `Assoc (("name", `String check_name)
-                     :: ("head_sha", `String sha)
-                     :: Value.json_items status)
-             |> Yojson.Safe.to_string
-           in
-           Log.debug (fun f -> f "create_check: %s" body);
-           let resp, resp_body = Current_http.post t.http ~headers ~body (Uri.of_string check_run_base) in
-           match Cohttp.Response.status resp with
-           | `Created -> ()
-           | err ->
-             Fmt.failwith "create_check_run: %s@,%s"
-               (Cohttp.Code.string_of_status err) resp_body
-         in
-         let update_check_run check_run_id =
-           let body = `Assoc (Value.json_items status) |> Yojson.Safe.to_string in
-           Log.debug (fun f -> f "update_check: %s" body);
-           let uri = Uri.of_string (check_run_base ^ "/" ^ check_run_id) in
-           let resp, resp_body = Current_http.patch t.http ~headers ~body uri in
-           match Cohttp.Response.status resp with
-           | `OK -> ()
-           | err ->
-             Fmt.failwith "update_check_run: %s@,%s"
-               (Cohttp.Code.string_of_status err) resp_body
-         in
-         (try
-            (match fetch_check_run_id () with
-             | None -> create_check ()
-             | Some id -> update_check_run id);
-            Ok ()
-          with ex ->
-            Log.info (fun f -> f "@[<v2>%a failed: %a@]"
-                                 pp (key, status)
-                                 Fmt.exn ex);
-            Error (`Msg "Failed to set GitHub status"))
-
-  end
-
-  module Set_status_cache = Current_cache.Output(Set_status)
-
   type t = commit
 
   let set_status commit check_name status =
     Current.component "set_check_run_status" |>
     let> (t, commit) = commit
     and> status = status in
-    Set_status_cache.set t {Set_status.Key.commit; check_name} status
+    let op = {
+      Check_run_set_status.http = t.http;
+      get_token_now = (fun () -> get_token t);
+      app_id = t.app_id;
+    } in
+    Check_run_set_status_cache.set t.check_run_set_status_cache op
+      {Check_run_set_status.Key.commit; check_name} status
 end
 
 
 module Commit = struct
-  module Set_status = struct
-    let id = "github-set-status"
-
-    type nonrec t = t
-
-    module Key = struct
-      type t = {
-        commit : Commit_id.t;
-        context : string;
-      }
-
-      let to_json { commit; context } =
-        `Assoc [
-          "commit", `String (Commit_id.digest commit);
-          "context", `String context
-        ]
-
-      let digest t = Yojson.Safe.to_string (to_json t)
-    end
-
-    module Value = Status
-
-    module Outcome = Current.Unit
-
-    let auto_cancel = true
-
-    let pp f ({ Key.commit; context }, status) =
-      Fmt.pf f "Set %a/%s to@ %a"
-        Commit_id.pp commit
-        context
-        Value.pp status
-
-    let publish t job key status =
-      Current.Job.start job ~pool ~level:Current.Level.Above_average;
-      let {Key.commit; context} = key in
-      let body = `Assoc (("context", `String context) :: Value.json_items status) in
-      match get_token t with
-      | Error (`Msg m) -> failwith m
-      | Ok token ->
-        let headers = Cohttp.Header.init_with "Authorization" ("bearer " ^ token) in
-        let uri = status_endpoint
-            ~owner_name:(Commit_id.owner_name commit)
-            ~commit:commit.Commit_id.hash
-        in
-        Current.Job.log job "@[<v2>POST %a:@,%a@]"
-          Uri.pp uri
-          (Yojson.Safe.pretty_print ~std:true) body;
-        let body = Yojson.Safe.to_string body in
-        (try
-           let resp, body = Current_http.post t.http ~headers ~body uri in
-           match Cohttp.Response.status resp with
-           | `Created -> Ok ()
-           | err ->
-             Log.warn (fun f -> f "@[<v2>%a failed: %s@,%s@]"
-                          pp (key, status)
-                          (Cohttp.Code.string_of_status err)
-                          body);
-             Error (`Msg "Failed to set GitHub status")
-         with ex ->
-           Log.warn (fun f -> f "@[<v2>%a failed: %a@]"
-                        pp (key, status)
-                        Fmt.exn ex);
-           Error (`Msg "Failed to set GitHub status"))
-  end
-
-  module Set_status_cache = Current_cache.Output(Set_status)
-
   type t = commit
 
   let uri (_, commit) = Commit_id.uri commit
@@ -1020,7 +1036,12 @@ module Commit = struct
     Current.component "set_status" |>
     let> (t, commit) = commit
     and> status = status in
-    Set_status_cache.set t {Set_status.Key.commit; context} status
+    let op = {
+      Commit_set_status.http = t.http;
+      get_token_now = (fun () -> get_token t);
+    } in
+    Commit_set_status_cache.set t.commit_set_status_cache op
+      {Commit_set_status.Key.commit; context} status
 
   let pr_name (_, id) = Commit_id.pr_name id
 
@@ -1147,9 +1168,10 @@ let make_config webhook_secret_file token_file =
 let make_config_opt webhook_secret_file token_file =
   Option.map (make_config webhook_secret_file) token_file
 
-let create ~sw ~net ~clock { token; webhook_secret } =
+let create ~engine ~net { token; webhook_secret } =
+  let caps = Current_cache.caps_of_engine engine in
   let http = Current_http.create ~net in
-  of_oauth ~sw ~clock ~http ~token ~webhook_secret
+  of_oauth ~caps ~http ~token ~webhook_secret
 
 let cmdliner =
   Term.(const make_config $ webhook_secret_file $ Arg.required token_file)

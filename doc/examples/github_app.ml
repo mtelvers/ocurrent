@@ -56,9 +56,9 @@ let check_run_status x =
   | Some { Current.Metadata.job_id; _ } -> github_check_run_status_of_state ?job_id state
   | None -> github_check_run_status_of_state state
 
-let pipeline ~app () =
+let pipeline ~docker ~git ~app () =
   let dockerfile =
-    let+ base = Docker.pull ~schedule:weekly "ocaml/opam:alpine-3.13-ocaml-4.13" in
+    let+ base = Docker.pull docker ~schedule:weekly "ocaml/opam:alpine-3.13-ocaml-4.13" in
     `Contents (dockerfile ~base)
   in
   Github.App.installations app |> Current.list_iter (module Github.Installation) @@ fun installation ->
@@ -66,8 +66,8 @@ let pipeline ~app () =
   repos |> Current.list_iter ~collapse_key:"repo" (module Github.Api.Repo) @@ fun repo ->
   Github.Api.Repo.ci_refs ~staleness:(Duration.of_day 90) repo
   |> Current.list_iter (module Github.Api.Commit) @@ fun head ->
-  let src = Git.fetch (Current.map Github.Api.Commit.id head) in
-  Docker.build ~pool ~pull:false ~dockerfile (`Git src)
+  let src = Git.fetch git (Current.map Github.Api.Commit.id head) in
+  Docker.build docker ~pool ~pull:false ~dockerfile (`Git src)
   |> check_run_status
   |> Github.Api.CheckRun.set_status head program_name
 
@@ -75,10 +75,17 @@ let main config mode app_config =
   Eio_main.run @@ fun env ->
   Eio.Switch.run @@ fun sw ->
   let net = Eio.Stdenv.net env in
-  let clock = Eio.Stdenv.clock env in
-  let app = Current_github.App.create ~sw ~net ~clock app_config in
   let has_role = Current_web.Site.allow_all in
-  let engine = Current.Engine.create ~sw ~env ~config (pipeline ~app) in
+  let app_p, app_r = Eio.Promise.create () in
+  let engine =
+    Current.Engine.create ~sw ~env ~config (fun engine ->
+      let git = Current_git.create ~engine in
+      let docker = Docker.create ~engine ~git in
+      let app = Current_github.App.create ~engine ~net app_config in
+      Eio.Promise.resolve app_r app;
+      pipeline ~docker ~git ~app ())
+  in
+  let app = Eio.Promise.await app_p in
   let webhook_secret = Current_github.App.webhook_secret app in
   (* this example does not have support for looking up job_ids for a commit *)
   let get_job_ids = (fun ~owner:_owner ~name:_name ~hash:_hash -> []) in

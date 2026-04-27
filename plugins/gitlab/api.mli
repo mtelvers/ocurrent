@@ -40,8 +40,7 @@ type t
 type refs
 
 val of_oauth :
-  sw:Eio.Switch.t ->
-  clock:float Eio.Time.clock_ty Eio.Resource.t ->
+  caps:Current_cache.caps ->
   http:Current_http.t ->
   token:string -> webhook_secret:string -> t
 val head_commit : t -> Repo_id.t -> Commit.t Current.t
@@ -59,9 +58,8 @@ type config
 val cmdliner : config Cmdliner.Term.t
 
 val create :
-  sw:Eio.Switch.t ->
+  engine:Current.Engine.t ->
   net:[`Generic | `Unix] Eio.Net.ty Eio.Resource.t ->
-  clock:float Eio.Time.clock_ty Eio.Resource.t ->
   config -> t
 
 val webhook_secret_file : string Cmdliner.Term.t
@@ -111,8 +109,7 @@ val input_webhook : webhooks_accepted -> unit
 (** [input_webhook] is called when a [webhook_accepted] request is made. *)
 
 val v :
-  sw:Eio.Switch.t ->
-  clock:float Eio.Time.clock_ty Eio.Resource.t ->
+  caps:Current_cache.caps ->
   http:Current_http.t ->
   get_token:(unit -> token) -> webhook_secret:string -> unit -> t
 

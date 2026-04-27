@@ -43,16 +43,16 @@ let gitlab_status_of_state = function
   | Error (`Active _) -> Gitlab.Api.Status.v ~url `Pending ~name:program_name
   | Error (`Msg m)    -> Gitlab.Api.Status.v ~url `Failure ~description:m ~name:program_name
 
-let pipeline ~gitlab ~repo_id () =
+let pipeline ~docker ~git ~gitlab ~repo_id () =
   let dockerfile =
-    let+ base = Docker.pull ~schedule:weekly "ocaml/opam:alpine-3.13-ocaml-4.13" in
+    let+ base = Docker.pull docker ~schedule:weekly "ocaml/opam:alpine-3.13-ocaml-4.13" in
     `Contents (dockerfile ~base)
   in
   Gitlab.Api.ci_refs gitlab ~staleness:(Duration.of_day 90) repo_id
   |> Current.list_iter (module Gitlab.Api.Commit) @@ fun head ->
-  let src = Git.fetch (Current.map Gitlab.Api.Commit.id head) in
+  let src = Git.fetch git (Current.map Gitlab.Api.Commit.id head) in
 
-  Docker.build ~pool ~pull:false ~dockerfile (`Git src)
+  Docker.build docker ~pool ~pull:false ~dockerfile (`Git src)
   |> Current.state
   |> Current.map gitlab_status_of_state
   |> Gitlab.Api.Commit.set_status head program_name
@@ -61,10 +61,17 @@ let main config mode gitlab_config repo =
   Eio_main.run @@ fun env ->
   Eio.Switch.run @@ fun sw ->
   let net = Eio.Stdenv.net env in
-  let clock = Eio.Stdenv.clock env in
-  let gitlab = Gitlab.Api.create ~sw ~net ~clock gitlab_config in
   let has_role = Current_web.Site.allow_all in
-  let engine = Current.Engine.create ~sw ~env ~config (pipeline ~gitlab ~repo_id:repo) in
+  let gitlab_p, gitlab_r = Eio.Promise.create () in
+  let engine =
+    Current.Engine.create ~sw ~env ~config (fun engine ->
+      let git = Current_git.create ~engine in
+      let docker = Docker.create ~engine ~git in
+      let gitlab = Gitlab.Api.create ~engine ~net gitlab_config in
+      Eio.Promise.resolve gitlab_r gitlab;
+      pipeline ~docker ~git ~gitlab ~repo_id:repo ())
+  in
+  let gitlab = Eio.Promise.await gitlab_p in
   let routes =
     Routes.(s "webhooks" / s "gitlab" /? nil @--> Gitlab.webhook ~webhook_secret:(Gitlab.Api.webhook_secret gitlab)) ::
     Current_web.routes engine

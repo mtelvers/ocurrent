@@ -11,17 +11,20 @@ let ( >>!= ) x f =
   | Ok y -> f y
   | Error `Msg m -> failwith m
 
-(* Each test takes [env] and capture the capabilities locally so [Job.create]
-   gets the same clock/process_mgr/fs the engine would in production. *)
+(* Tests use a mock clock so log timestamps are deterministic. *)
+let mock_clock () =
+  let c = Eio_mock.Clock.make () in
+  Eio_mock.Clock.set_time c 0.0;
+  (c :> float Eio.Time.clock_ty Eio.Resource.t)
+
 let create_job ~env ?priority ~sw ~label ~config () =
   Job.create ?priority ~sw
-    ~clock:(Eio.Stdenv.clock env)
+    ~clock:(mock_clock ())
     ~process_mgr:(Eio.Stdenv.process_mgr env)
     ~fs:(Eio.Stdenv.fs env)
     ~label ~config ()
 
 let streams env =
-  Job.timestamp := (fun () -> 0.0);
   Eio.Switch.run @@ fun sw ->
   let config = Current.Config.v () in
   let job = create_job ~env ~sw ~label:"streams" ~config () in
@@ -32,7 +35,6 @@ let streams env =
                                               out1\nout2\nout3\n" (read path)
 
 let output env =
-  Job.timestamp := (fun () -> 0.0);
   Eio.Switch.run @@ fun sw ->
   let config = Current.Config.v () in
   let job = create_job ~env ~sw ~label:"output" ~config () in
@@ -52,7 +54,6 @@ let pp_cmd ppf args =
   Current.Process.pp_cmd ppf (List.map remove_token args)
 
 let pp_command env =
-  Job.timestamp := (fun () -> 0.0);
   Eio.Switch.run @@ fun sw ->
   let config = Current.Config.v () in
   let job = create_job ~env ~sw ~label:"output" ~config () in
@@ -63,7 +64,6 @@ let pp_command env =
   Alcotest.(check string) "Log" "1970-01-01 00:00.00: Exec: \"echo\" \"token:<TOKEN>\"\n" (read path)
 
 let cancel env =
-  Job.timestamp := (fun () -> 0.0);
   Eio.Switch.run @@ fun sw ->
   let config = Current.Config.v () in
   let job = create_job ~env ~sw ~label:"output" ~config () in
@@ -115,8 +115,6 @@ let pool env =
   Eio.Switch.run @@ fun outer_sw ->
   let config = Current.Config.v () in
   let pool = Current.Pool.create ~label:"test" 1 in
-  (* sw2 is outer (so sw1's release fires first). Fork order must still
-     be job1 then job2 so job1 wins the pool slot. *)
   Eio.Switch.run @@ fun sw2 ->
   let job2 = create_job ~env ~sw:sw2 ~label:"job-2" ~config () in
   (Eio.Switch.run @@ fun sw1 ->
@@ -126,8 +124,6 @@ let pool env =
    Eio.Fiber.yield ();
    Alcotest.check start_state_t "First job started" Returned (observe s1);
    Alcotest.check start_state_t "Second job queued" Pending (observe s2);
-   (* sw1 releases next — we also need to observe s2 *after* that, so
-      smuggle s2 back out. *)
    s2) |> fun s2 ->
   Eio.Fiber.yield ();
   Alcotest.check start_state_t "Second job ready" Returned (observe s2)
@@ -151,8 +147,6 @@ let pool_priority env =
   Eio.Switch.run @@ fun outer_sw ->
   let config = Current.Config.v () in
   let pool = Current.Pool.create ~label:"test" 1 in
-  (* Nest so sw1 closes first (releasing the slot), sw3 second (tested
-     by s3 becoming Returned), sw2 last. Fork order: job1, job2, job3. *)
   Eio.Switch.run @@ fun sw2 ->
   let job2 = create_job ~env ~sw:sw2 ~label:"job-2" ~config () in
   let (s2, s3) =
@@ -170,13 +164,11 @@ let pool_priority env =
       Alcotest.check start_state_t "Third job queued" Pending (observe s3);
       s2, s3
     in
-    (* sw1 released *)
     Eio.Fiber.yield ();
     Alcotest.check start_state_t "Second job queued" Pending (observe s2);
     Alcotest.check start_state_t "High-priority third job ready" Returned (observe s3);
     s2, s3
   in
-  (* sw3 released *)
   let _ = s3 in
   Eio.Fiber.yield ();
   Alcotest.check start_state_t "Second job ready" Returned (observe s2)

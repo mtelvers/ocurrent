@@ -27,17 +27,22 @@ let pull = false    (* Whether to check for updates using "docker build --pull" 
 let timeout = Duration.of_min 50    (* Max build time *)
 
 (* Run "docker build" on the latest commit in Git repository [repo]. *)
-let pipeline ~repo () =
+let pipeline ~docker ~repo () =
   let src = Git.Local.head_commit repo in
-  let image = Docker.build ~pull ~timeout (`Git src) in
-  Docker.run image ~args:["dune"; "exec"; "--"; "examples/docker_build_local.exe"; "--help"]
+  let image = Docker.build docker ~pull ~timeout (`Git src) in
+  Docker.run docker image ~args:["dune"; "exec"; "--"; "examples/docker_build_local.exe"; "--help"]
 
 let main env config mode capnp repo =
   Eio.Switch.run @@ fun sw ->
   let net = Eio.Stdenv.net env in
   let process_mgr = Eio.Stdenv.process_mgr env in
   let repo = Git.Local.v ~sw ~process_mgr (Fpath.v repo) in
-  let engine = Current.Engine.create ~sw ~env ~config (pipeline ~repo) in
+  let engine =
+    Current.Engine.create ~sw ~env ~config (fun engine ->
+      let git = Current_git.create ~engine in
+      let docker = Docker.create ~engine ~git in
+      pipeline ~docker ~repo ())
+  in
   let service_id = Capnp_rpc_unix.Vat_config.derived_id capnp "engine" in
   let restore = Capnp_rpc_net.Restorer.single service_id (Rpc.engine engine) in
   let vat = Capnp_rpc_unix.serve ~sw ~restore capnp in

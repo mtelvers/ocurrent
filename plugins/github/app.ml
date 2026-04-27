@@ -58,8 +58,7 @@ type config = {
 type t = {
   config : config;
   installations : Installs.t;
-  sw : Eio.Switch.t;
-  clock : float Eio.Time.clock_ty Eio.Resource.t;
+  caps : Current_cache.caps;
   http : Current_http.t;
 }
 
@@ -144,7 +143,7 @@ let get_installations app =
 
 let installation t ~account iid =
   let api =
-    Api.v ~sw:t.sw ~clock:t.clock ~http:t.http
+    Api.v ~caps:t.caps ~http:t.http
       ~get_token:(fun () -> get_token t iid)
       ~account:("i-" ^ account) ~app_id:t.config.app_id
       ~webhook_secret:t.config.webhook_secret ()
@@ -176,7 +175,7 @@ let monitor_installations t () =
       | Error (`Msg m) ->
         Log.warn (fun f -> f "Failed to update list of installations: %s" m)
     end;
-    Eio.Time.sleep t.clock 60.0;   (* Wait at least 1m between updates *)
+    Eio.Time.sleep t.caps.clock 60.0;   (* Wait at least 1m between updates *)
     Eio.Mutex.use_ro installations_changed_mutex (fun () ->
       Eio.Condition.await installations_changed_cond installations_changed_mutex);
     aux ()
@@ -189,11 +188,12 @@ let installations t =
 
 (* Construction *)
 
-let create ~sw ~net ~clock config =
+let create ~engine ~net config =
+  let caps = Current_cache.caps_of_engine engine in
   let installations = Installs.create ~name:"installations" (Error (`Active `Running)) in
   let http = Current_http.create ~net in
-  let t = { config; installations; sw; clock; http } in
-  Eio.Fiber.fork_daemon ~sw (fun () ->
+  let t = { config; installations; caps; http } in
+  Eio.Fiber.fork_daemon ~sw:caps.sw (fun () ->
     (try monitor_installations t ()
      with ex -> Log.err (fun f -> f "monitor_installations failed: %a" Fmt.exn ex));
     `Stop_daemon);

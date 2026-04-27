@@ -41,14 +41,14 @@ let github_status_of_state = function
   | Error (`Active _) -> Github.Api.Status.v ~url `Pending
   | Error (`Msg m)    -> Github.Api.Status.v ~url `Failure ~description:m
 
-let pipeline ~github ~repo () =
+let pipeline ~docker ~git ~github ~repo () =
   let head = Github.Api.head_commit github repo in
-  let src = Git.fetch (Current.map Github.Api.Commit.id head) in
+  let src = Git.fetch git (Current.map Github.Api.Commit.id head) in
   let dockerfile =
-    let+ base = Docker.pull ~schedule:weekly "ocaml/opam:alpine-3.13-ocaml-4.13" in
+    let+ base = Docker.pull docker ~schedule:weekly "ocaml/opam:alpine-3.13-ocaml-4.13" in
     `Contents (dockerfile ~base)
   in
-  Docker.build ~pull:false ~dockerfile (`Git src)
+  Docker.build docker ~pull:false ~dockerfile (`Git src)
   |> Current.state
   |> Current.map github_status_of_state
   |> Github.Api.Commit.set_status head "ocurrent"
@@ -57,12 +57,17 @@ let main config mode github_config repo =
   Eio_main.run @@ fun env ->
   Eio.Switch.run @@ fun sw ->
   let net = Eio.Stdenv.net env in
-  let process_mgr = Eio.Stdenv.process_mgr env in
-  let clock = Eio.Stdenv.clock env in
-  let github = Github.Api.create ~sw ~net ~clock github_config in
   let has_role = Current_web.Site.allow_all in
-  let _ = process_mgr in
-  let engine = Current.Engine.create ~sw ~env ~config (pipeline ~github ~repo) in
+  let github_p, github_r = Eio.Promise.create () in
+  let engine =
+    Current.Engine.create ~sw ~env ~config (fun engine ->
+      let git = Current_git.create ~engine in
+      let docker = Docker.create ~engine ~git in
+      let github = Github.Api.create ~engine ~net github_config in
+      Eio.Promise.resolve github_r github;
+      pipeline ~docker ~git ~github ~repo ())
+  in
+  let github = Eio.Promise.await github_p in
   (* this example does not have support for looking up job_ids for a commit *)
   let get_job_ids = (fun ~owner:_owner ~name:_name ~hash:_hash -> []) in
   let routes =

@@ -41,21 +41,29 @@ module Commit : sig
   val unmarshal : string -> t
 end
 
-val clone : schedule:Current_cache.Schedule.t -> ?gref:string -> string -> Commit.t Current.t
-(** [clone ~schedule ~gref uri] evaluates to the head commit of [uri]'s [gref] branch (default: "master"). *)
+type t
 
-val fetch : ?token:string -> Commit_id.t Current.t -> Commit.t Current.t
-(** [fetch ?token cid] fetches the commit [cid].
+val create : engine:Current.Engine.t -> t
+(** [create ~engine] builds a Git plugin runtime: per-engine fetch/clone
+    caches keyed off the engine's capabilities. *)
+
+val clone : t -> schedule:Current_cache.Schedule.t -> ?gref:string -> string -> Commit.t Current.t
+(** [clone t ~schedule ~gref uri] evaluates to the head commit of [uri]'s [gref] branch (default: "master"). *)
+
+val fetch : t -> ?token:string -> Commit_id.t Current.t -> Commit.t Current.t
+(** [fetch t ?token cid] fetches the commit [cid].
     @param token Optional authentication token for private repositories. *)
 
 val with_checkout :
+  t ->
   ?pool:unit Current.Pool.t ->
   job:Current.Job.t ->
   Commit.t ->
   (Fpath.t -> 'a Current.or_error) ->
   'a Current.or_error
-(** [with_checkout ~job c fn] clones [c] to a temporary directory and runs [fn tmpdir].
-    When it returns, the directory is deleted.
+(** [with_checkout t ~job c fn] clones [c] to a temporary directory and runs [fn tmpdir].
+    When it returns, the directory is deleted. On failure to find the
+    commit locally [t]'s fetch cache is invalidated to force a re-fetch.
     @param pool Used to prevent too many clones from happening at once. *)
 
 module Local : sig

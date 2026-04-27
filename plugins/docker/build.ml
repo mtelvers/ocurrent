@@ -5,6 +5,9 @@ type t = {
   pool : unit Current.Pool.t option;
   timeout : Duration.t option;
   level : Current.Level.t option;
+  git : Current_git.t;
+  (** Used to invalidate the fetch cache when [with_checkout] can't find
+      a commit it expected (cf. Build.with_context's [`Git] arm). *)
 }
 
 let id = "docker-build"
@@ -55,7 +58,7 @@ let or_raise = function
   | Ok () -> ()
   | Error (`Msg m) -> raise (Failure m)
 
-let with_context ~job context fn =
+let with_context ~git ~job context fn =
   match context with
   | `No_context -> Current.Process.with_tmpdir ~prefix:"build-context-" fn
   | `Dir path ->
@@ -65,9 +68,9 @@ let with_context ~job context fn =
           ["rsync"; "-aHq"; Fpath.to_string path ^ "/"; "."]
       in
       fn dir
-  | `Git commit -> Current_git.with_checkout ~job commit fn
+  | `Git commit -> Current_git.with_checkout git ~job commit fn
 
-let build { pull; pool; timeout; level } job key =
+let build { pull; pool; timeout; level; git } job key =
   let { Key.commit; docker_context; dockerfile; squash; buildx; build_args; path } = key in
   begin match dockerfile with
     | `Contents contents ->
@@ -76,7 +79,7 @@ let build { pull; pool; timeout; level } job key =
   end;
   let level = Option.value level ~default:Current.Level.Average in
   Current.Job.start ?timeout ?pool job ~level;
-  with_context ~job commit @@ fun dir ->
+  with_context ~git ~job commit @@ fun dir ->
   let dir = match path with
     | Some path -> Fpath.(dir // path)
     | None -> dir

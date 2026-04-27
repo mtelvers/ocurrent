@@ -11,20 +11,9 @@ end
 
 module Map = Map.Make(String)
 
-(* For unit-tests: *)
-let timestamp = ref Unix.gettimeofday
-
-(* [sleep] starts as an error sentinel. [Engine.create] installs the real
-   implementation (using its own clock) on first call, but only if the test
-   harness hasn't already overridden it (physical equality check on the
-   sentinel). *)
-let sleep_uninitialised _ =
-  failwith "Job.sleep called before Engine.create or test harness initialisation"
-let sleep : (float -> unit) ref = ref sleep_uninitialised
-
-let try_set_default_sleep clock =
-  if !sleep == sleep_uninitialised then
-    sleep := (fun d -> Eio.Time.sleep clock d)
+(* In production we read the time from each [Job.t]'s [clock]. Tests that
+   need a deterministic clock construct one with {!Eio_mock.Clock.make}
+   and pass it via [Engine.create]'s [~env] (or [~clock] override). *)
 
 type t = {
   switch : Eio.Switch.t;
@@ -64,7 +53,7 @@ let write t msg =
 
 let log t fmt =
   let { Unix.tm_year; tm_mon; tm_mday; tm_hour; tm_min; tm_sec; _ } =
-    !timestamp () |> Unix.gmtime in
+    Eio.Time.now t.clock |> Unix.gmtime in
   let fmt = "%04d-%02d-%02d %02d:%02d.%02d: @[" ^^ fmt ^^ "@]@." in
   Fmt.kstr (write t) fmt
     (tm_year + 1900) (tm_mon + 1) tm_mday
@@ -118,7 +107,7 @@ let cancel t reason =
 
 let create ?(priority=`Low) ~sw ~clock ~process_mgr ~fs ~label ~config () =
   let jobs_dir = Lazy.force jobs_dir in
-  let time = !timestamp () |> Unix.gmtime in
+  let time = Eio.Time.now clock |> Unix.gmtime in
   let date =
     let { Unix.tm_year; tm_mon; tm_mday; _ } = time in
     Fmt.str "%04d-%02d-%02d" (tm_year + 1900) (tm_mon + 1) tm_mday
@@ -226,14 +215,14 @@ let start_with ?timeout ~pool ~level t =
     Log.warn (fun f -> f "start called, but job %s is already running!" t.id);
     Fmt.failwith "Job.start called twice!"
   );
-  Eio.Promise.resolve t.set_start_time (!timestamp ());
+  Eio.Promise.resolve t.set_start_time (Eio.Time.now t.clock);
   timeout |> Option.iter (fun duration ->
     (* Fork as a *daemon* on the job's switch: a non-daemon fiber would
        keep [Switch.run] alive until the sleep finished, blocking the
        job's on_release hook (and the log-stream broadcast) for every
        job that completes before its timeout. *)
     Eio.Fiber.fork_daemon ~sw:t.switch (fun () ->
-      !sleep (Duration.to_f duration);
+      Eio.Time.sleep t.clock (Duration.to_f duration);
       (match t.cancel_hooks with
        | `Cancelled _ -> ()
        | `Hooks _ -> cancel t (Fmt.str "Timeout (%a)" pp_duration duration));

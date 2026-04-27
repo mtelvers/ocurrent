@@ -35,16 +35,16 @@ let dockerfile ~base ~ocaml_version =
 let weekly = Current_cache.Schedule.v ~valid_for:(Duration.of_day 7) ()
 
 (* Run "docker build" on the latest commit in Git repository [repo]. *)
-let pipeline ~repo () =
+let pipeline ~docker ~repo () =
   let src = Git.Local.head_commit repo in
   let build ocaml_version =
-    let base = Docker.pull ~schedule:weekly ("ocaml/opam:debian-ocaml-" ^ ocaml_version) in
+    let base = Docker.pull docker ~schedule:weekly ("ocaml/opam:debian-ocaml-" ^ ocaml_version) in
     let dockerfile =
       let+ base = base in
       `Contents (dockerfile ~base ~ocaml_version)
     in
-    Docker.build ~label:ocaml_version ~pull:false ~dockerfile (`Git src) |>
-    Docker.tag ~tag:(Fmt.str "example-%s" ocaml_version)
+    Docker.build docker ~label:ocaml_version ~pull:false ~dockerfile (`Git src) |>
+    Docker.tag docker ~tag:(Fmt.str "example-%s" ocaml_version)
   in
   Current.all [
     build "4.10";
@@ -59,7 +59,12 @@ let main config mode repo =
   let net = Eio.Stdenv.net env in
   let process_mgr = Eio.Stdenv.process_mgr env in
   let repo = Git.Local.v ~sw ~process_mgr (Fpath.v repo) in
-  let engine = Current.Engine.create ~sw ~env ~config (pipeline ~repo) in
+  let engine =
+    Current.Engine.create ~sw ~env ~config (fun engine ->
+      let git = Current_git.create ~engine in
+      let docker = Docker.create ~engine ~git in
+      pipeline ~docker ~repo ())
+  in
   let site = Current_web.Site.(v ~has_role:allow_all) ~name:program_name (Current_web.routes engine) in
   Current_web.run ~sw ~net ~mode site
 

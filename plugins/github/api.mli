@@ -66,8 +66,7 @@ module Ref_map : Map.S with type key = Ref.t
 type t
 type refs
 val of_oauth :
-  sw:Eio.Switch.t ->
-  clock:float Eio.Time.clock_ty Eio.Resource.t ->
+  caps:Current_cache.caps ->
   http:Current_http.t ->
   token:string -> webhook_secret:string -> t
 val exec_graphql : ?variables:(string * Yojson.Safe.t) list -> t -> string -> Yojson.Safe.t
@@ -87,12 +86,11 @@ val cmdliner : config Cmdliner.Term.t
 val cmdliner_opt : config option Cmdliner.Term.t
 
 val create :
-  sw:Eio.Switch.t ->
+  engine:Current.Engine.t ->
   net:[`Generic | `Unix] Eio.Net.ty Eio.Resource.t ->
-  clock:float Eio.Time.clock_ty Eio.Resource.t ->
   config -> t
-(** [create ~sw ~net ~clock config] activates an OAuth-based [config]
-    inside the engine's Eio scope. *)
+(** [create ~engine ~net config] activates an OAuth-based [config] inside
+    the engine's Eio scope. *)
 val webhook_secret_file : string Cmdliner.Term.t
 
 module Repo : sig
@@ -159,13 +157,12 @@ val input_webhook : Yojson.Safe.t -> unit
 (** Call this when we get a "pull_request", "push" or "create" webhook event. *)
 
 val v :
-  sw:Eio.Switch.t ->
-  clock:float Eio.Time.clock_ty Eio.Resource.t ->
+  caps:Current_cache.caps ->
   http:Current_http.t ->
   get_token:(unit -> token) ->
   ?app_id:string -> account:string -> webhook_secret:string -> unit -> t
-(** [v ~get_token ?app_id] is a configuration that uses [get_token] when it needs to get or
-    refresh the API token.
+(** [v ~caps ~http ~get_token ?app_id] is a configuration that uses [get_token]
+    when it needs to get or refresh the API token.
     Note: [get_token] can return a failed token, in which case the expiry time says when to try again.
           If [get_token] instead raises an exception, this is turned into an error token with a 1 minute expiry.
     @param account This is a string used to label point counters in Prometheus. *)

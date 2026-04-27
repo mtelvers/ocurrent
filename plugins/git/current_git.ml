@@ -77,20 +77,29 @@ module Fetch = struct
 end
 
 module Fetch_cache = Current_cache.Make(Fetch)
-
-let fetch ?token cid =
-  Current.component "fetch" |>
-  let> cid = cid in
-  Fetch_cache.get { Fetch.token } cid
-
 module Clone_cache = Current_cache.Make(Clone)
 
-let clone ~schedule ?(gref="master") repo =
+type t = {
+  fetch_cache : Fetch_cache.t;
+  clone_cache : Clone_cache.t;
+}
+
+let create ~engine =
+  let caps = Current_cache.caps_of_engine engine in
+  { fetch_cache = Fetch_cache.create ~caps;
+    clone_cache = Clone_cache.create ~caps }
+
+let fetch t ?token cid =
+  Current.component "fetch" |>
+  let> cid = cid in
+  Fetch_cache.get t.fetch_cache { Fetch.token } cid
+
+let clone t ~schedule ?(gref="master") repo =
   Current.component "clone@ %s@ %s" repo gref |>
   let> () = Current.return () in
-  Clone_cache.get ~schedule Clone.No_context { Clone.Key.repo; gref }
+  Clone_cache.get t.clone_cache ~schedule Clone.No_context { Clone.Key.repo; gref }
 
-let with_checkout ?pool ~job commit fn =
+let with_checkout t ?pool ~job commit fn =
   let { Commit.repo; id } = commit in
   let short_hash = Astring.String.with_range ~len:8 id.Commit_id.hash in
   Current.Job.log job "@[<v2>Checking out commit %s. To reproduce:@,%a@]"
@@ -112,7 +121,7 @@ let with_checkout ?pool ~job commit fn =
     | Error e ->
       match Commit.check_cached ~cancellable:false ~job commit with
       | Error not_cached ->
-        Fetch_cache.invalidate id;
+        Fetch_cache.invalidate t.fetch_cache id;
         Error not_cached
       | Ok () -> Error e
   in

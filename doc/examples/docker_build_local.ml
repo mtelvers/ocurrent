@@ -12,10 +12,10 @@ let () = Prometheus_unix.Logging.init ()
 (* included in doc/example_pipelines.md as code snippet *)
 [@@@part "pipeline"]
 (* Run "docker build" on the latest commit in Git repository [repo]. *)
-let pipeline ~repo () =
+let pipeline ~docker ~repo () =
   let src = Git.Local.head_commit repo in
-  let image = Docker.build ~pull ~timeout (`Git src) in
-  Docker.run image ~args:["dune"; "exec"; "--"; "docker_build_local"; "--help"]
+  let image = Docker.build docker ~pull ~timeout (`Git src) in
+  Docker.run docker image ~args:["dune"; "exec"; "--"; "docker_build_local"; "--help"]
 
 [@@@part "end-pipeline"]
 
@@ -34,7 +34,12 @@ let main config mode repo =
   let process_mgr = Eio.Stdenv.process_mgr env in
   let repo = find_git_root ~process_mgr repo in
   let repo = Git.Local.v ~sw ~process_mgr (Fpath.v repo) in
-  let engine = Current.Engine.create ~sw ~env ~config (pipeline ~repo) in
+  let engine =
+    Current.Engine.create ~sw ~env ~config (fun engine ->
+      let git = Current_git.create ~engine in
+      let docker = Docker.create ~engine ~git in
+      pipeline ~docker ~repo ())
+  in
   let site = Current_web.Site.(v ~has_role:allow_all) ~name:program_name (Current_web.routes engine) in
   Current_web.run ~sw ~net ~mode site
 

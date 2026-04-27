@@ -79,6 +79,19 @@ module Engine = struct
     jobs : actions Job.Map.t;
   }
 
+  type cache_registry = {
+    key_of_job_id : (job_id, string * string) Hashtbl.t;
+    (** For each live job, the (op_id, key_digest) of the database entry
+        it will create. Read by [Current_cache] to show build history for
+        in-flight jobs that aren't yet in the database. *)
+    job_id_of_key : (string * string, job_id) Hashtbl.t;
+  }
+
+  let make_cache_registry () = {
+    key_of_job_id = Hashtbl.create 10;
+    job_id_of_key = Hashtbl.create 10;
+  }
+
   type t = {
     last_result : results ref;
     pipeline : unit term Lazy.t;
@@ -88,6 +101,7 @@ module Engine = struct
     fs : Eio.Fs.dir_ty Eio.Path.t;
     process_mgr : Eio_unix.Process.mgr_ty Eio.Resource.t;
     net : [`Generic | `Unix] Eio.Net.ty Eio.Resource.t;
+    cache_registry : cache_registry;
   }
 
   let release_queue = Queue.create ()
@@ -131,34 +145,26 @@ module Engine = struct
     jobs = Job.Map.empty;
   }
 
-  (* Subsystems within the OCurrent libraries (currently: lib_cache) register
-     init hooks here at module-load time. [create] runs them once it has its
-     own [~sw] and capabilities, so subsystems don't have to be wired up
-     explicitly by every caller. *)
-  let init_hooks :
-    (sw:Eio.Switch.t ->
-     clock:float Eio.Time.clock_ty Eio.Resource.t ->
-     process_mgr:Eio_unix.Process.mgr_ty Eio.Resource.t ->
-     fs:Eio.Fs.dir_ty Eio.Path.t ->
-     net:[`Generic | `Unix] Eio.Net.ty Eio.Resource.t ->
-     unit) list ref = ref []
-
-  let register_init f = init_hooks := f :: !init_hooks
 
   let default_trace ~next:_ _ = ()
 
   let pipeline t = Lazy.force t.pipeline
 
-  let create ~sw ~(env : _ env) ?(config=Config.default) ?(trace=default_trace) f =
-    let clock = Eio.Stdenv.clock env in
+  let create ~sw ~(env : _ env) ?clock ?(config=Config.default) ?(trace=default_trace) f =
+    let clock = Option.value clock ~default:(Eio.Stdenv.clock env) in
     let fs = Eio.Stdenv.fs env in
     let process_mgr = Eio.Stdenv.process_mgr env in
     let net = Eio.Stdenv.net env in
-    Job.try_set_default_sleep clock;
-    List.iter (fun f -> f ~sw ~clock ~process_mgr ~fs ~net) !init_hooks;
     let last_result = ref booting in
-    let pipeline = lazy (f ()) in
-    let t = { last_result; config; pipeline; switch = sw; clock; fs; process_mgr; net } in
+    let cache_registry = make_cache_registry () in
+    (* The pipeline thunk receives [t] so that consumers can build cache
+       instances from [Current_cache.caps_of_engine t] inside it. The
+       recursive [let rec] is fine because [lazy] delays the body. *)
+    let rec t = {
+      last_result; config;
+      pipeline = lazy (f t);
+      switch = sw; clock; fs; process_mgr; net; cache_registry;
+    } in
     let rec aux outcome =
       let next = next_evaluation () in
       Log.debug (fun f -> f "Evaluating...");
@@ -185,12 +191,18 @@ module Engine = struct
       failwith "Engine is already running (Config.now already set)!";
     Current_incr.change Config.active_config (Some config);
     Config.start_slow_start ~sw ~clock config;
+    (* Force the pipeline thunk and register the term in the graph
+       *before* forking the engine daemon. This way any monitors / cache
+       slots created during initial evaluation are forked while the main
+       fiber still has control, so they get a chance to run their setup
+       (yields, [enable], etc.) before the daemon's first [trace] fires. *)
+    let outcome = Executor.run (Lazy.force t.pipeline) in
     Eio.Fiber.fork_daemon ~sw (fun () ->
       Fun.protect
         ~finally:(fun () -> Current_incr.change Config.active_config None)
         (fun () ->
           Eio.Fiber.yield ();
-          try aux (Executor.run (Lazy.force pipeline))
+          try aux outcome
           with Exit ->
             (* Clean up, for unit-tests *)
             Current_incr.propagate ();
@@ -203,6 +215,7 @@ module Engine = struct
   let fs t = t.fs
   let process_mgr t = t.process_mgr
   let net t = t.net
+  let cache_registry t = t.cache_registry
 
   let on_disable fn =
     Current_incr.on_release @@ fun () ->

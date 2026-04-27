@@ -1,13 +1,20 @@
+type t
+(** A live Slack runtime: shared HTTPS client and per-engine result cache. *)
+
+val create :
+  engine:Current.Engine.t ->
+  net:[`Generic | `Unix] Eio.Net.ty Eio.Resource.t ->
+  t
+(** [create ~engine ~net] builds a fresh runtime inside the engine's Eio
+    scope. *)
+
 type channel
 
-val channel : net:_ Eio.Net.t -> Uri.t -> channel
-(** [channel ~net uri] makes a channel using the endpoint URI from Slack
-    (create a new app, then add a new webhook using the "Incoming Webhooks"
-    page to get the URI). [~net] supplies network capabilities for the HTTPS
-    client.
-    e.g. [channel ~net @@ Uri.of_string "https://hooks.slack.com/services/..."] *)
+val channel : t -> Uri.t -> channel
+(** [channel t uri] makes a channel bound to [t]'s HTTPS client. The URI
+    is the Slack incoming-webhook URL (create a new app, then add a webhook
+    via the "Incoming Webhooks" page). *)
 
-val post : channel -> key:string -> string Current.t -> unit Current.t
-(** [post channel ~key message] records that [key] is now set to [message], and
-    posts [message] to [channel] if it has changed.
-    e.g. [post to_dev ~key:"build-status" s] *)
+val post : t -> channel -> key:string -> string Current.t -> unit Current.t
+(** [post t channel ~key message] records that [key] is now set to
+    [message], and posts [message] to [channel] if it has changed. *)

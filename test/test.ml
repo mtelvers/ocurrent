@@ -37,7 +37,7 @@ let test_commit =
 
 let head = Commit_var.create ~name:"head" (Ok test_commit)
 
-let with_commit v () =
+let with_commit v _engine () =
   v (Commit_var.get head)
 
 (* A very simple linear pipeline. Given a commit (e.g. the head of
@@ -211,7 +211,7 @@ let test_option_none env =
 
 (* This is just to check the diagram when the state box is hidden. *)
 let test_state env =
-  let pipeline () =
+  let pipeline _engine () =
     Current.component "set-status" |>
     let** value = Current.state ~hidden:true (Current.active `Ready) in
     Alcotest.(check engine_result) "Pending" (Error (`Active `Ready)) value;
@@ -230,7 +230,7 @@ let test_pair env =
     let+ s = Current.state (show name x) in
     Alcotest.check engine_result name expected s
   in
-  let pipeline () =
+  let pipeline _engine () =
     let ok = Current.return () in
     let pending = Current.active `Running in
     let failed = Current.fail "failed" in
@@ -260,7 +260,7 @@ let test_context env =
   in
   let a = label "a" in
   let b = label "b" in
-  let pipeline () =
+  let pipeline _engine () =
     Current.with_context a @@ fun () ->
     Current.with_context b @@ fun () ->
     label "c"
@@ -341,7 +341,7 @@ let test_observe env =
     let+ v = failure in
     v ^ "::"
   in
-  let pipeline () =
+  let pipeline _engine () =
     let+ _ = ok
     and+ _ = failure
     and+ _ = active

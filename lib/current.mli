@@ -290,12 +290,6 @@ module Job : sig
       The resource is returned to the pool when [sw] is released.
       The operation will be aborted if the job is cancelled. *)
 
-  (**/**)
-
-  (* For unit tests we need our own test clock: *)
-
-  val timestamp : (unit -> float) ref
-  val sleep : (float -> unit) ref
 end
 
 (** The main event loop. *)
@@ -310,9 +304,10 @@ module Engine : sig
   val create :
     sw:Eio.Switch.t ->
     env:_ env ->
+    ?clock:float Eio.Time.clock_ty Eio.Resource.t ->
     ?config:Config.t ->
     ?trace:(next:unit Eio.Promise.t -> results -> unit) ->
-    (unit -> unit term) ->
+    (t -> unit term) ->
     t
   (** [create ~sw ~env pipeline] is a new engine running [pipeline].
       The engine will evaluate the pipeline immediately, and again whenever
@@ -320,7 +315,9 @@ module Engine : sig
 
       [~sw] is the engine's switch; the engine forks its evaluation loop as a
       daemon on it. [~env] supplies the Eio capabilities (clock, fs,
-      process_mgr, net) the engine and its subsystems need. *)
+      process_mgr, net) the engine and its subsystems need.
+      [?clock] overrides [env]'s clock — useful for tests that need a
+      deterministic clock (cf. {!Eio_mock.Clock}). *)
 
   val update : unit -> unit
   (** Primitives should call this after using {!Current_incr.change} to run
@@ -336,17 +333,15 @@ module Engine : sig
   val process_mgr : t -> Eio_unix.Process.mgr_ty Eio.Resource.t
   val net : t -> [`Generic | `Unix] Eio.Net.ty Eio.Resource.t
 
-  val register_init :
-    (sw:Eio.Switch.t ->
-     clock:float Eio.Time.clock_ty Eio.Resource.t ->
-     process_mgr:Eio_unix.Process.mgr_ty Eio.Resource.t ->
-     fs:Eio.Fs.dir_ty Eio.Path.t ->
-     net:[`Generic | `Unix] Eio.Net.ty Eio.Resource.t ->
-     unit) -> unit
-  (** [register_init f] arranges for [f] to be called once when
-      [Engine.create] runs, with the engine's switch and capabilities.
-      Used by sibling libraries (e.g. {!Current_cache}) to wire themselves
-      into the engine without the caller having to do it explicitly. *)
+  type cache_registry = private {
+    key_of_job_id : (job_id, string * string) Hashtbl.t;
+    job_id_of_key : (string * string, job_id) Hashtbl.t;
+  }
+  (** Engine-scoped state used by {!Current_cache}: live-job <-> key maps.
+      Plugin authors typically don't access this directly; it flows through
+      the [caps] record that {!Current_cache.caps_of_engine} builds. *)
+
+  val cache_registry : t -> cache_registry
 
   val state : t -> results
   (** The most recent results from evaluating the pipeline. *)

@@ -183,12 +183,11 @@ module Api : sig
   module Ref_map : Map.S with type key = Ref.t
 
   val of_oauth :
-    sw:Eio.Switch.t ->
-    clock:float Eio.Time.clock_ty Eio.Resource.t ->
+    caps:Current_cache.caps ->
     http:Current_http.t ->
     token:string -> webhook_secret:string -> t
-  (** [of_oauth ~sw ~clock ~http ~token ~webhook_secret] is a configuration
-      that authenticates to GitHub using [token]. *)
+  (** [of_oauth ~caps ~http ~token ~webhook_secret] is a configuration that
+      authenticates to GitHub using [token]. *)
 
   val exec_graphql : ?variables:(string * Yojson.Safe.t) list -> t -> string -> Yojson.Safe.t
   (** [exec_graphql t query] executes [query] on GitHub. *)
@@ -263,6 +262,8 @@ module Api : sig
       net:[`Generic | `Unix] Eio.Net.ty Eio.Resource.t ->
       clock:float Eio.Time.clock_ty Eio.Resource.t ->
       t
+    (** Anonymous still takes its own [~sw ~net ~clock] since it doesn't go
+        through the cache machinery and so doesn't need a {!caps}. *)
 
     val head_of : t -> Repo_id.t -> Ref.t -> Current_git.Commit_id.t Current.t
     (** [head_of t repo ref] is the head commit of [repo]/[ref]. No API token is used to access this,
@@ -279,11 +280,10 @@ module Api : sig
   (** Like [cmdliner], but the argument is optional. *)
 
   val create :
-    sw:Eio.Switch.t ->
+    engine:Current.Engine.t ->
     net:[`Generic | `Unix] Eio.Net.ty Eio.Resource.t ->
-    clock:float Eio.Time.clock_ty Eio.Resource.t ->
     config -> t
-  (** [create ~sw ~net ~clock config] activates [config] inside the engine's
+  (** [create ~engine ~net config] activates [config] inside the engine's
       Eio scope. *)
 end
 
@@ -319,12 +319,12 @@ module App : sig
   (** A live GitHub application activated inside the engine's Eio scope. *)
 
   val create :
-    sw:Eio.Switch.t ->
+    engine:Current.Engine.t ->
     net:[`Generic | `Unix] Eio.Net.ty Eio.Resource.t ->
-    clock:float Eio.Time.clock_ty Eio.Resource.t ->
     config -> t
-  (** [create ~sw ~net ~clock config] activates [config] inside the engine's
-      Eio scope. The install-monitor daemon is forked on [~sw]. *)
+  (** [create ~engine ~net config] activates [config] inside the engine's
+      Eio scope. The install-monitor daemon is forked on the engine's
+      switch. *)
 
   val webhook_secret : t -> string
   (** Webhook secret to validate payloads from GitHub. *)

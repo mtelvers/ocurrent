@@ -52,7 +52,7 @@ let results = Eio.Stream.create max_int
 let push_result x = Eio.Stream.add results x
 
 module Show_files = struct
-  type t = unit
+  type t = Current_git.t
 
   let id = "show-files"
 
@@ -64,9 +64,9 @@ module Show_files = struct
 
   module Value = Current.Unit
 
-  let build () job commit =
+  let build git job commit =
     Current.Job.start job ~level:Current.Level.Harmless;
-    Current_git.with_checkout ~job commit (fun tmpdir ->
+    Current_git.with_checkout git ~job commit (fun tmpdir ->
         let files =
           Sys.readdir (Fpath.to_string tmpdir)
           |> Array.to_list
@@ -82,10 +82,10 @@ end
 
 module SF = Current_cache.Make (Show_files)
 
-let show_files commit =
+let show_files sf git commit =
   Current.component "show_files"
   |> let> commit = commit in
-     SF.get () commit
+     SF.get sf git commit
 
 let init ~env root =
   let cwd = Fpath.to_string root in
@@ -168,16 +168,19 @@ let test () =
       ~sw ~process_mgr:(Eio.Stdenv.process_mgr env)
       (Fpath.add_seg dir "main")
   in
-  let pipeline () =
+  let pipeline engine =
+    let git = Current_git.create ~engine in
+    let sf = SF.create ~caps:(Current_cache.caps_of_engine engine) in
+    fun () ->
     let remote_commit = Current_git.Local.head_commit repo in
     let id = Current.map Current_git.Commit.id remote_commit in
-    let clone = Current_git.fetch id in
-    let+ result = Current.catch (show_files clone) in
+    let clone = Current_git.fetch git id in
+    let+ result = Current.catch (show_files sf git clone) in
     match result with
     | Ok () -> ()
     | Error (`Msg m) -> push_result (Some [ m ])
   in
-  let _engine = Current.Engine.create ~sw ~env pipeline in
+  let _engine = Current.Engine.create ~sw ~env (fun engine -> pipeline engine ()) in
   let expected = Some [ "file"; "sub" ] in
   check_result "Initial state" expected;
   remove ~env dir;

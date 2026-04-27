@@ -15,5 +15,9 @@ val complete_clone : Commit.t -> unit
 val reset : unit -> unit
 (** Reset all repositories to uncloned. *)
 
+val make_cache : engine:Current.Engine.t -> unit
+(** Test plumbing: build the per-engine cache instance and stash it for
+    {!fetch} to read. Driver calls this at engine startup. *)
+
 val fetch : Commit.t Current.t -> Fpath.t Current.t
 (** [fetch commit] pulls [commit] to a local Git repository. *)

@@ -71,10 +71,9 @@ let stats =
 (* Write two SVG files for pipeline [v]: one containing the static analysis
    before it has been run, and another once a particular commit hash has been
    supplied to it. *)
-let test env ?config ?final_stats ~name v actions =
+let test env ?config ?clock ?final_stats ~name v_fn actions =
   Git.reset ();
   Docker.reset ();
-  SVar.set selected (Ok v);
   let step = ref 1 in
   let trace ~next step_result =
     if !step = 0 then raise Exit;
@@ -119,12 +118,19 @@ let test env ?config ?final_stats ~name v actions =
   try
     Eio.Switch.run (fun sw ->
       Docker.set_engine_sw sw;
-      (* Propagate the [SVar.set] inside the new engine's switch scope, so
-         any Monitor.create triggered by graph evaluation attaches to it
-         (rather than the previous test's now-closed switch). *)
-      Current_incr.propagate ();
       let _engine : Current.Engine.t =
-        Current.Engine.create ~sw ~env ?config ~trace (fun () -> test_pipeline)
+        let clock = Option.map (fun c -> (c :> float Eio.Time.clock_ty Eio.Resource.t)) clock in
+        Current.Engine.create ~sw ~env ?clock ?config ~trace (fun engine ->
+          Docker.make_caches ~engine;
+          Git.make_cache ~engine;
+          (* The thunk runs once, when the engine forces it. We have
+             [engine] in scope, so any cache instances the test wants to
+             build (via [Current_cache.caps_of_engine engine]) can be
+             constructed here. *)
+          let v = v_fn engine in
+          SVar.set selected (Ok v);
+          Current_incr.propagate ();
+          test_pipeline)
       in
       (* The engine runs as a daemon and keeps going until [trace] raises
          [Exit]; block here so the switch stays open until that happens. *)

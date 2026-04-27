@@ -69,11 +69,17 @@ end
 
 module Run_cache = Current_cache.Make(Run)
 
+let run_cache_ref : Run_cache.t option ref = ref None
+let run_cache () =
+  match !run_cache_ref with
+  | Some c -> c
+  | None -> failwith "Driver must construct caches before running"
+
 let run image ~cmd =
   Current.component "docker run @[%a@]" Fmt.(list ~sep:sp string) cmd |>
   let> image = image in
   let key = { Key.image; cmd } in
-  Run_cache.get No_context key
+  Run_cache.get (run_cache ()) No_context key
 
 let complete image ~cmd r =
   let key = { Key.image; cmd } in
@@ -99,10 +105,16 @@ end
 
 module Push_cache = Current_cache.Make(Push)
 
+let push_cache_ref : Push_cache.t option ref = ref None
+let push_cache () =
+  match !push_cache_ref with
+  | Some c -> c
+  | None -> failwith "Driver must construct caches before pushing"
+
 let push image ~tag =
   Current.component "docker push %s" tag |>
   let> image = image in
-  Push_cache.get No_context image
+  Push_cache.get (push_cache ()) No_context image
 
 let image_pulls
   : (string,
@@ -121,6 +133,11 @@ let engine_sw () =
   match !engine_sw_ref with
   | Some sw -> sw
   | None -> failwith "Driver.test must run before pulling images in the docker mock"
+
+let make_caches ~engine =
+  let caps = Current_cache.caps_of_engine engine in
+  run_cache_ref := Some (Run_cache.create ~caps);
+  push_cache_ref := Some (Push_cache.create ~caps)
 
 let get_pull tag =
   match Hashtbl.find_opt image_pulls tag with
@@ -175,8 +192,10 @@ let reset () =
   containers := Containers.empty;
   Hashtbl.clear image_pulls;
   Hashtbl.clear image_monitors;
-  Run_cache.reset ~db:true;
-  Push_cache.reset ~db:true
+  Current_cache.Db.drop_all "docker-run";
+  Current_cache.Db.drop_all "docker-push";
+  run_cache_ref := None;
+  push_cache_ref := None
 
 let assert_finished () =
   !containers |> Containers.iter (fun key s ->
