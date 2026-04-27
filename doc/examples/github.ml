@@ -53,12 +53,16 @@ let pipeline ~github ~repo () =
   |> Current.map github_status_of_state
   |> Github.Api.Commit.set_status head "ocurrent"
 
-let main config mode github repo =
+let main config mode github_config repo =
   Eio_main.run @@ fun env ->
   Eio.Switch.run @@ fun sw ->
-  Current.Engine_env.init ~sw ~env;
+  let net = Eio.Stdenv.net env in
+  let process_mgr = Eio.Stdenv.process_mgr env in
+  let clock = Eio.Stdenv.clock env in
+  let github = Github.Api.create ~sw ~net ~clock github_config in
   let has_role = Current_web.Site.allow_all in
-  let engine = Current.Engine.create ~config (pipeline ~github ~repo) in
+  let _ = process_mgr in
+  let engine = Current.Engine.create ~sw ~env ~config (pipeline ~github ~repo) in
   (* this example does not have support for looking up job_ids for a commit *)
   let get_job_ids = (fun ~owner:_owner ~name:_name ~hash:_hash -> []) in
   let routes =
@@ -66,7 +70,7 @@ let main config mode github repo =
     Current_web.routes engine
   in
   let site = Current_web.Site.(v ~has_role) ~name:program_name routes in
-  Current_web.run ~mode site
+  Current_web.run ~sw ~net ~mode site
 
 (* Command-line parsing *)
 

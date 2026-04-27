@@ -46,23 +46,28 @@ end = struct
   let mem name l = List.exists ((=) (String.lowercase_ascii name)) l
 end
 
-type t = {
+(** Pure config produced by Cmdliner — no Eio capabilities, no daemons. *)
+type config = {
   app_id : string;
   key : Mirage_crypto_pk.Rsa.priv;
-  allowlist : Allowlist.t;      (* Accounts which can use this app. *)
-  installations : Installs.t;
-  webhook_secret : string; (* Shared secret for validating webhooks from GitHub *)
-  mutable monitor_started : bool;
-  (* The installation-monitor daemon is forked on the engine's switch on
-     first use, since [make_config] runs at Cmdliner-parse time — before
-     [Engine_env.init] — and there's no switch to fork on yet. *)
+  allowlist : Allowlist.t;
+  webhook_secret : string;
 }
 
-let webhook_secret t = t.webhook_secret
+(** Live app constructed from a config inside the engine's Eio scope. *)
+type t = {
+  config : config;
+  installations : Installs.t;
+  sw : Eio.Switch.t;
+  clock : float Eio.Time.clock_ty Eio.Resource.t;
+  http : Current_http.t;
+}
 
-let http { app_id; key; _ } op uri =
+let webhook_secret t = t.config.webhook_secret
+
+let api_call t op uri =
   let iat = truncate @@ Unix.gettimeofday () in
-  let jwt = Token.encode ~key ~iat ~app_id in
+  let jwt = Token.encode ~key:t.config.key ~iat ~app_id:t.config.app_id in
   let headers = Cohttp.Header.init_with "Authorization" ("bearer " ^ jwt) in
   let headers = Cohttp.Header.add headers "accept" "application/vnd.github.machine-man-preview+json" in
   Log.debug (fun f -> f "API call on %a" Uri.pp uri);
@@ -77,15 +82,15 @@ let http { app_id; key; _ } op uri =
              (Cohttp.Code.string_of_status err)
              body
 
-let get ~headers uri = Current_http.get ~headers uri
-let post ~headers uri = Current_http.post ~headers uri
+let get t ~headers uri = Current_http.get t.http ~headers uri
+let post t ~headers uri = Current_http.post t.http ~headers uri
 
 let minute = 60.0
 
 let get_token app iid =
   let uri = access_tokens_endpoint iid in
   let now = Unix.gettimeofday () in
-  let _resp, json = http app post uri in
+  let _resp, json = api_call app (post app) uri in
   let open Yojson.Safe.Util in
   let token = Ok (json |> member "token" |> to_string) in
   (* The token is valid for 60 minutes, so request a new one after 50 minutes. *)
@@ -104,13 +109,13 @@ let get_installations app =
   let open Current.Result.Syntax in
   try
     let rec aux uri =
-      let resp, json = http app get uri in
+      let resp, json = api_call app (get app) uri in
       let open Yojson.Safe.Util in
       let installs =
         json |> to_list |> List.filter_map (fun json ->
             let id = json |> member "id" |> to_int in
             let account = json |> member "account" |> member "login" |> to_string in
-            if Allowlist.mem account app.allowlist then (
+            if Allowlist.mem account app.config.allowlist then (
               Log.info (fun f -> f "Found installation %d for %S" id account);
               let repository_selection = json |> member "repository_selection" |> to_string in
               match repository_selection with
@@ -138,7 +143,12 @@ let get_installations app =
     Error (`Msg (Fmt.str "Failed to get GitHub installations: %a" Fmt.exn ex))
 
 let installation t ~account iid =
-  let api = Api.v ~get_token:(fun () -> get_token t iid) ~account:("i-" ^ account) ~app_id:t.app_id ~webhook_secret:t.webhook_secret () in
+  let api =
+    Api.v ~sw:t.sw ~clock:t.clock ~http:t.http
+      ~get_token:(fun () -> get_token t iid)
+      ~account:("i-" ^ account) ~app_id:t.config.app_id
+      ~webhook_secret:t.config.webhook_secret ()
+  in
   Installation.v ~api ~account ~iid
 
 module Int_set = Set.Make(Int)
@@ -166,27 +176,28 @@ let monitor_installations t () =
       | Error (`Msg m) ->
         Log.warn (fun f -> f "Failed to update list of installations: %s" m)
     end;
-    Eio.Time.sleep (Current.Engine_env.clock ()) 60.0;   (* Wait at least 1m between updates *)
+    Eio.Time.sleep t.clock 60.0;   (* Wait at least 1m between updates *)
     Eio.Mutex.use_ro installations_changed_mutex (fun () ->
       Eio.Condition.await installations_changed_cond installations_changed_mutex);
     aux ()
   in
   aux ()
 
-let ensure_monitor t =
-  if not t.monitor_started then begin
-    t.monitor_started <- true;
-    Eio.Fiber.fork_daemon ~sw:(Current.Engine_env.get_sw ()) (fun () ->
-      (try monitor_installations t ()
-       with ex -> Log.err (fun f -> f "monitor_installations failed: %a" Fmt.exn ex));
-      `Stop_daemon
-    )
-  end
-
 let installations t =
-  ensure_monitor t;
   let+ apis = Installs.get t.installations in
   apis |> Int_map.bindings |> List.map snd
+
+(* Construction *)
+
+let create ~sw ~net ~clock config =
+  let installations = Installs.create ~name:"installations" (Error (`Active `Running)) in
+  let http = Current_http.create ~net in
+  let t = { config; installations; sw; clock; http } in
+  Eio.Fiber.fork_daemon ~sw (fun () ->
+    (try monitor_installations t ()
+     with ex -> Log.err (fun f -> f "monitor_installations failed: %a" Fmt.exn ex));
+    `Stop_daemon);
+  t
 
 (* Command-line options *)
 
@@ -197,13 +208,12 @@ let make_config app_id private_key_file allowlist webhook_secret_file =
   match X509.Private_key.decode_pem data with
     | Error (`Msg msg) -> Fmt.failwith "Failed to parse secret key!@ %s" msg
     | Ok (`RSA key) ->
-      let installations = Installs.create ~name:"installations" (Error (`Active `Running)) in
-      { app_id; key; allowlist; installations; webhook_secret; monitor_started = false }
+      { app_id; key; allowlist; webhook_secret }
     | Ok _ -> Fmt.failwith "Unsupported private key type" [@@warning "-11"]
 
 open Cmdliner
 
-let make_config_opt app_id private_key_file allowlist webhook_secret : t option Term.ret =
+let make_config_opt app_id private_key_file allowlist webhook_secret : config option Term.ret =
   match app_id, private_key_file, allowlist with
   | None, None, _ -> `Ok None
   | Some app_id, Some private_key_file, Some allowlist -> `Ok (Some (make_config app_id private_key_file allowlist webhook_secret))

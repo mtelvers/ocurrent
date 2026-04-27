@@ -71,12 +71,14 @@ let pipeline ~app () =
   |> check_run_status
   |> Github.Api.CheckRun.set_status head program_name
 
-let main config mode app =
+let main config mode app_config =
   Eio_main.run @@ fun env ->
   Eio.Switch.run @@ fun sw ->
-  Current.Engine_env.init ~sw ~env;
+  let net = Eio.Stdenv.net env in
+  let clock = Eio.Stdenv.clock env in
+  let app = Current_github.App.create ~sw ~net ~clock app_config in
   let has_role = Current_web.Site.allow_all in
-  let engine = Current.Engine.create ~config (pipeline ~app) in
+  let engine = Current.Engine.create ~sw ~env ~config (pipeline ~app) in
   let webhook_secret = Current_github.App.webhook_secret app in
   (* this example does not have support for looking up job_ids for a commit *)
   let get_job_ids = (fun ~owner:_owner ~name:_name ~hash:_hash -> []) in
@@ -85,7 +87,7 @@ let main config mode app =
     Current_web.routes engine
   in
   let site = Current_web.Site.(v ~has_role) ~name:program_name routes in
-  Current_web.run ~mode site
+  Current_web.run ~sw ~net ~mode site
 
 (* Command-line parsing *)
 

@@ -94,10 +94,10 @@ let exec ?cwd ?(stdin="") ?(pp_cmd = pp_cmd) ?pp_error_command ?env ~cancellable
   Log.info (fun f -> f "Exec: @[%a@]" pp_cmd cmd);
   Job.log job "Exec: @[%a@]" pp_cmd cmd;
   Eio.Switch.run @@ fun sw ->
-  let mgr = Engine_env.process_mgr () in
+  let mgr = Job.process_mgr job in
   let cwd =
     Option.map (fun p ->
-      Eio.Path.(Engine_env.fs () / Fpath.to_string p)) cwd
+      Eio.Path.(Job.fs job / Fpath.to_string p)) cwd
   in
   let stdin_r, stdin_w = Eio.Process.pipe ~sw mgr in
   let stdout_r, stdout_w = Eio.Process.pipe ~sw mgr in
@@ -133,10 +133,10 @@ let check_output ?cwd ?(stdin="") ?(pp_cmd = pp_cmd) ?pp_error_command ~cancella
   Log.info (fun f -> f "Exec: @[%a@]" pp_cmd cmd);
   Job.log job "Exec: @[%a@]" pp_cmd cmd;
   Eio.Switch.run @@ fun sw ->
-  let mgr = Engine_env.process_mgr () in
+  let mgr = Job.process_mgr job in
   let cwd =
     Option.map (fun p ->
-      Eio.Path.(Engine_env.fs () / Fpath.to_string p)) cwd
+      Eio.Path.(Job.fs job / Fpath.to_string p)) cwd
   in
   let stdin_r, stdin_w = Eio.Process.pipe ~sw mgr in
   let stdout_r, stdout_w = Eio.Process.pipe ~sw mgr in

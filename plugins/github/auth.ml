@@ -1,11 +1,16 @@
-type t = {
+type config = {
   client_id : string;
   client_secret: string;
   scopes : string list;
 } [@@deriving yojson]
 
-let v ?(scopes=["user:email"]) ~client_id ~client_secret () =
-  { client_id; client_secret; scopes }
+type t = {
+  config : config;
+  http : Current_http.t;
+}
+
+let v ?(scopes=["user:email"]) ~http ~client_id ~client_secret () =
+  { config = { client_id; client_secret; scopes }; http }
 
 module Endpoint = struct
   let authorize =
@@ -14,7 +19,7 @@ module Endpoint = struct
       let scopes = String.concat " " scopes in
       Uri.with_query' uri [
         "scope", scopes;
-        "client_id", t.client_id;
+        "client_id", t.config.client_id;
         "state", state;
       ]
 
@@ -22,8 +27,8 @@ module Endpoint = struct
     let uri = Uri.of_string "https://github.com/login/oauth/access_token" in
     fun t ~state code ->
       Uri.with_query' uri [
-        "client_id", t.client_id;
-        "client_secret", t.client_secret;
+        "client_id", t.config.client_id;
+        "client_secret", t.config.client_secret;
         "code", code;
         "state", state;
       ]
@@ -32,20 +37,20 @@ module Endpoint = struct
 end
 
 let make_login_uri t ~csrf =
-  Endpoint.authorize ~scopes:t.scopes ~state:csrf t
+  Endpoint.authorize ~scopes:t.config.scopes ~state:csrf t
 
 let get_access_token t ~state code =
   let headers = Cohttp.Header.init_with "Accept" "application/json" in
-  let resp, body = Current_http.post ~headers (Endpoint.access_token t ~state code) in
+  let resp, body = Current_http.post t.http ~headers (Endpoint.access_token t ~state code) in
   match Cohttp.Response.status resp with
   | `OK ->
     let json = Yojson.Safe.from_string body in
     Ok (Yojson.Safe.Util.(json |> member "access_token" |> to_string))
   | err -> Error (err, body)
 
-let get_user token =
+let get_user t token =
   let headers = Cohttp.Header.init_with "Authorization" ("token " ^ token) in
-  let resp, body = Current_http.get ~headers Endpoint.user in
+  let resp, body = Current_http.get t.http ~headers Endpoint.user in
   match Cohttp.Response.status resp with
   | `OK ->
     let json = Yojson.Safe.from_string body in
@@ -55,8 +60,8 @@ let get_user token =
     Error (err, body)
 
 let example_config () =
-  v ~client_id:"..." ~client_secret:"..." ()
-  |> to_yojson
+  { client_id = "..."; client_secret = "..."; scopes = ["user:email"] }
+  |> config_to_yojson
   |> Yojson.Safe.pretty_to_string
 
 let configuration_howto ctx =
@@ -89,7 +94,7 @@ let login t : Current_web.Resource.t = object
             Log.warn (fun f -> f "Failed to get OAuth token from GitHub: %s: %s" (Cohttp.Code.string_of_status status) msg);
             Current_web.Utils.Server.respond_error ~status:`Internal_server_error ~body:"Failed to get token" ()
           | Ok token ->
-            match get_user token with
+            match get_user t token with
             | Error (status, msg) ->
               Log.warn (fun f -> f "Failed to get user details from GitHub: %s: %s" (Cohttp.Code.string_of_status status) msg);
               Current_web.Utils.Server.respond_error ~status:`Internal_server_error ~body:"Failed to get user details" ()
@@ -124,11 +129,13 @@ let make_config path =
   | exception ex -> Fmt.failwith "Invalid JSON in %s:@,%a" path Fmt.exn ex
   | json ->
     json
-    |> of_yojson
+    |> config_of_yojson
     |> function
     | Ok x -> x
     | Error msg ->
       Fmt.failwith "Invalid GitHub OAuth configuration: %s@.Expected: %s" msg (example_config ())
+
+let create ~net config = { config; http = Current_http.create ~net }
 
 let cmdliner =
   Term.(const (Option.map make_config) $ oauth_config)

@@ -1,5 +1,14 @@
 type 'a or_error = ('a, [`Msg of string]) result
 
+(** Row-polymorphic Eio environment constraint. The engine needs a [clock],
+    [fs], [process_mgr] and [net]; any object providing at least these works,
+    so [Eio_main.run]'s env passes directly and tests can supply mocks. *)
+type 'a env = (< clock : float Eio.Time.clock_ty Eio.Resource.t;
+                 fs : Eio.Fs.dir_ty Eio.Path.t;
+                 process_mgr : Eio_unix.Process.mgr_ty Eio.Resource.t;
+                 net : [`Generic | `Unix] Eio.Net.ty Eio.Resource.t;
+                 .. > as 'a)
+
 module Result = Current_term.Result
 
 module Config = Config
@@ -74,6 +83,11 @@ module Engine = struct
     last_result : results ref;
     pipeline : unit term Lazy.t;
     config : Config.t;
+    switch : Eio.Switch.t;
+    clock : float Eio.Time.clock_ty Eio.Resource.t;
+    fs : Eio.Fs.dir_ty Eio.Path.t;
+    process_mgr : Eio_unix.Process.mgr_ty Eio.Resource.t;
+    net : [`Generic | `Unix] Eio.Net.ty Eio.Resource.t;
   }
 
   let release_queue = Queue.create ()
@@ -117,14 +131,34 @@ module Engine = struct
     jobs = Job.Map.empty;
   }
 
+  (* Subsystems within the OCurrent libraries (currently: lib_cache) register
+     init hooks here at module-load time. [create] runs them once it has its
+     own [~sw] and capabilities, so subsystems don't have to be wired up
+     explicitly by every caller. *)
+  let init_hooks :
+    (sw:Eio.Switch.t ->
+     clock:float Eio.Time.clock_ty Eio.Resource.t ->
+     process_mgr:Eio_unix.Process.mgr_ty Eio.Resource.t ->
+     fs:Eio.Fs.dir_ty Eio.Path.t ->
+     net:[`Generic | `Unix] Eio.Net.ty Eio.Resource.t ->
+     unit) list ref = ref []
+
+  let register_init f = init_hooks := f :: !init_hooks
+
   let default_trace ~next:_ _ = ()
 
   let pipeline t = Lazy.force t.pipeline
 
-  let create ?(config=Config.default) ?(trace=default_trace) f =
+  let create ~sw ~(env : _ env) ?(config=Config.default) ?(trace=default_trace) f =
+    let clock = Eio.Stdenv.clock env in
+    let fs = Eio.Stdenv.fs env in
+    let process_mgr = Eio.Stdenv.process_mgr env in
+    let net = Eio.Stdenv.net env in
+    Job.try_set_default_sleep clock;
+    List.iter (fun f -> f ~sw ~clock ~process_mgr ~fs ~net) !init_hooks;
     let last_result = ref booting in
     let pipeline = lazy (f ()) in
-    let t = { last_result; config; pipeline } in
+    let t = { last_result; config; pipeline; switch = sw; clock; fs; process_mgr; net } in
     let rec aux outcome =
       let next = next_evaluation () in
       Log.debug (fun f -> f "Evaluating...");
@@ -150,11 +184,8 @@ module Engine = struct
     if Current_incr.observe Config.now <> None then
       failwith "Engine is already running (Config.now already set)!";
     Current_incr.change Config.active_config (Some config);
-    Config.start_slow_start
-      ~sw:(Engine_env.get_sw ())
-      ~clock:(Engine_env.clock ())
-      config;
-    Eio.Fiber.fork_daemon ~sw:(Engine_env.get_sw ()) (fun () ->
+    Config.start_slow_start ~sw ~clock config;
+    Eio.Fiber.fork_daemon ~sw (fun () ->
       Fun.protect
         ~finally:(fun () -> Current_incr.change Config.active_config None)
         (fun () ->
@@ -166,6 +197,12 @@ module Engine = struct
             flush_release_queue ();
             raise Exit));
     t
+
+  let switch t = t.switch
+  let clock t = t.clock
+  let fs t = t.fs
+  let process_mgr t = t.process_mgr
+  let net t = t.net
 
   let on_disable fn =
     Current_incr.on_release @@ fun () ->
@@ -222,12 +259,30 @@ module Monitor = struct
     pp : Format.formatter -> unit;
     value : 'a Current_term.Output.t Current_incr.var;
     reading : bool Current_incr.var;
+    parent_sw : Eio.Switch.t;        (* Outer switch we attach activations to. *)
     mutable ref_count : int;
     mutable need_refresh : bool;
     mutable active : bool;
+    mutable release : unit Eio.Promise.u option;
+    (** Resolves when the monitor's daemon exits, closing its switch. *)
     cond : Eio.Condition.t;
     mutex : Eio.Mutex.t;
   }
+
+  (* Spawn a fresh switch for one activation of a monitor: the daemon body
+     runs inside [Switch.run mon_sw], so any sub-fibers it forks attach
+     there. The switch closes when [release_r] is resolved (which we do
+     when [enable] returns [`Finished]) or when the parent switch is torn
+     down. Same shape as [Current_cache.spawn_slot_switch]. *)
+  let spawn_monitor_switch ~parent_sw =
+    let sw_p, sw_r = Eio.Promise.create () in
+    let release_p, release_r = Eio.Promise.create () in
+    Eio.Fiber.fork_daemon ~sw:parent_sw (fun () ->
+      Eio.Switch.run (fun mon_sw ->
+        Eio.Promise.resolve sw_r mon_sw;
+        Eio.Promise.await release_p);
+      `Stop_daemon);
+    Eio.Promise.await sw_p, release_r
 
   let catch t fn =
     try fn ()
@@ -280,10 +335,17 @@ module Monitor = struct
         );
       if not t.active then (
         t.active <- true;
-        Eio.Fiber.fork_daemon ~sw:(Engine_env.get_sw ()) (fun () ->
+        let mon_sw, release = spawn_monitor_switch ~parent_sw:t.parent_sw in
+        t.release <- Some release;
+        Eio.Fiber.fork ~sw:mon_sw (fun () ->
             Eio.Fiber.yield ();
             let `Finished = enable t in
-            `Stop_daemon
+            (* Daemon exited because [ref_count = 0]. Close [mon_sw] now so
+               its enclosing daemon can [`Stop_daemon] and we don't hold the
+               engine's switch open with idle fibers. *)
+            (match t.release with
+             | Some r -> t.release <- None; Eio.Promise.resolve r ()
+             | None -> ())
           )
       );
       Current_incr.read (Current_incr.of_var t.value) @@ fun value ->
@@ -293,11 +355,13 @@ module Monitor = struct
       Current_incr.write (value, Some metadata)
     end
 
-  let create ~read ~watch ~pp =
+  let create ~sw ~read ~watch ~pp =
     {
       ref_count = 0;
       active = false;
       need_refresh = true;
+      release = None;
+      parent_sw = sw;
       cond = Eio.Condition.create ();
       mutex = Eio.Mutex.create ();
       reading = Current_incr.var false;
@@ -333,7 +397,6 @@ end
 let state_dir = Disk_store.state_dir
 
 module Db = Db
-module Engine_env = Engine_env
 module Process = Process
 module Pool = Pool
 module Log_matcher = Log_matcher

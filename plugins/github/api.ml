@@ -380,6 +380,9 @@ type t = {
   app_id : string option;
   webhook_secret : string; (* Shared secret for validating webhooks from GitHub *)
   token_lock : Eio.Mutex.t;
+  sw : Eio.Switch.t;
+  clock : float Eio.Time.clock_ty Eio.Resource.t;
+  http : Current_http.t;
   mutable token : token;
   mutable monitors: monitors;
 }
@@ -390,19 +393,23 @@ and refs = {
 }
 
 let webhook_secret t = t.webhook_secret
+let sw t = t.sw
+let clock t = t.clock
+let http t = t.http
 
 let default_ref t = t.default_ref
 
 let all_refs t = t.all_refs
 
-let v ~get_token ?app_id ~account ~webhook_secret () =
+let v ~sw ~clock ~http ~get_token ?app_id ~account ~webhook_secret () =
   let monitors = Monitors.empty in
   let token_lock = Eio.Mutex.create () in
-  { get_token; token_lock; token = no_token; monitors; account; app_id; webhook_secret }
+  { get_token; token_lock; token = no_token; monitors; account; app_id; webhook_secret;
+    sw; clock; http }
 
-let of_oauth ~token ~webhook_secret =
+let of_oauth ~sw ~clock ~http ~token ~webhook_secret =
   let get_token () = { token = Ok token; expiry = None} in
-  v ~get_token ~account:"oauth" ~webhook_secret ()
+  v ~sw ~clock ~http ~get_token ~account:"oauth" ~webhook_secret ()
 
 let get_cached_token t =
   let now = Unix.gettimeofday () in
@@ -446,7 +453,7 @@ let exec_graphql ?variables t query =
   | Error (`Msg m) -> failwith m
   | Ok token ->
     let headers = Cohttp.Header.init_with "Authorization" ("bearer " ^ token) in
-    let resp, body = Current_http.post ~headers ~body graphql_endpoint in
+    let resp, body = Current_http.post t.http ~headers ~body graphql_endpoint in
     match Cohttp.Response.status resp with
     | `OK ->
       let json = Yojson.Safe.from_string body in
@@ -518,7 +525,7 @@ module Monitor (Query : GRAPHQL_QUERY) = struct
     let watch refresh =
       let owner_name = Printf.sprintf "%s/%s" repo.owner repo.name in
       let stop = ref false in
-      Eio.Fiber.fork_daemon ~sw:(Current.Engine_env.get_sw ()) (fun () ->
+      Eio.Fiber.fork_daemon ~sw:t.sw (fun () ->
         let rec aux () =
           if !stop then `Stop_daemon
           else begin
@@ -526,7 +533,7 @@ module Monitor (Query : GRAPHQL_QUERY) = struct
                await_event ~owner_name;
                Log.info (fun f -> f "Received webhook for owner/name: %s" owner_name);
                refresh ();
-               Eio.Time.sleep (Current.Engine_env.clock ()) 10.0   (* Limit updates to 1 per 10 seconds *)
+               Eio.Time.sleep t.clock 10.0   (* Limit updates to 1 per 10 seconds *)
              with ex ->
                Log.err (fun f -> f "%s thread failed: %a" Query.name Fmt.exn ex));
             aux ()
@@ -541,7 +548,7 @@ module Monitor (Query : GRAPHQL_QUERY) = struct
         Eio.Condition.broadcast cond
     in
     let pp f = Fmt.pf f "Watch %a %s" Repo_id.pp repo Query.name in
-    Current.Monitor.create ~read ~watch ~pp
+    Current.Monitor.create ~sw:t.sw ~read ~watch ~pp
 
   let get t repo =
     let monitor =
@@ -846,7 +853,7 @@ module CheckRun = struct
                      owner repo sha))
                query
            in
-           let resp, body = Current_http.get ~headers uri in
+           let resp, body = Current_http.get t.http ~headers uri in
            match Cohttp.Response.status resp with
            | `OK ->
              let json = Yojson.Safe.from_string body in
@@ -873,7 +880,7 @@ module CheckRun = struct
              |> Yojson.Safe.to_string
            in
            Log.debug (fun f -> f "create_check: %s" body);
-           let resp, resp_body = Current_http.post ~headers ~body (Uri.of_string check_run_base) in
+           let resp, resp_body = Current_http.post t.http ~headers ~body (Uri.of_string check_run_base) in
            match Cohttp.Response.status resp with
            | `Created -> ()
            | err ->
@@ -884,7 +891,7 @@ module CheckRun = struct
            let body = `Assoc (Value.json_items status) |> Yojson.Safe.to_string in
            Log.debug (fun f -> f "update_check: %s" body);
            let uri = Uri.of_string (check_run_base ^ "/" ^ check_run_id) in
-           let resp, resp_body = Current_http.patch ~headers ~body uri in
+           let resp, resp_body = Current_http.patch t.http ~headers ~body uri in
            match Cohttp.Response.status resp with
            | `OK -> ()
            | err ->
@@ -966,7 +973,7 @@ module Commit = struct
           (Yojson.Safe.pretty_print ~std:true) body;
         let body = Yojson.Safe.to_string body in
         (try
-           let resp, body = Current_http.post ~headers ~body uri in
+           let resp, body = Current_http.post t.http ~headers ~body uri in
            match Cohttp.Response.status resp with
            | `Created -> Ok ()
            | err ->
@@ -1045,6 +1052,14 @@ module Repo = struct
 end
 
 module Anonymous = struct
+  type t = {
+    sw : Eio.Switch.t;
+    clock : float Eio.Time.clock_ty Eio.Resource.t;
+    http : Current_http.t;
+  }
+
+  let create ~sw ~net ~clock = { sw; clock; http = Current_http.create ~net }
+
   let ref_endpoint ~owner ~name gref =
     let gref = Ref.to_git gref in
     match Astring.String.cut ~sep:"/" gref with
@@ -1052,9 +1067,9 @@ module Anonymous = struct
     | Some _ -> Fmt.failwith "Ref %S does not start with 'refs/'!" gref
     | None -> Fmt.failwith "Missing '/' in ref %S" gref
 
-  let query_head { Repo_id.owner; name } gref =
+  let query_head t { Repo_id.owner; name } gref =
     let uri = ref_endpoint ~owner ~name gref in
-    let resp, body = Current_http.get uri in
+    let resp, body = Current_http.get t.http uri in
     match Cohttp.Response.status resp with
     | `OK | `Created ->
       let json = Yojson.Safe.from_string body in
@@ -1066,11 +1081,11 @@ module Anonymous = struct
                (Cohttp.Code.string_of_status err)
                body
 
-  let head_of (repo : Repo_id.t) gref =
+  let head_of t (repo : Repo_id.t) gref =
     let owner_name = Printf.sprintf "%s/%s" repo.owner repo.name in
     let read () =
       try
-        let hash = query_head repo gref in
+        let hash = query_head t repo gref in
         let id = { Commit_id.owner = repo.owner; repo = repo.name; hash; id = gref; committed_date = ""; message = "" } in
         Ok (Commit_id.to_git ~ssh:false id)
       with ex ->
@@ -1079,14 +1094,14 @@ module Anonymous = struct
     in
     let watch refresh =
       let stop = ref false in
-      Eio.Fiber.fork_daemon ~sw:(Current.Engine_env.get_sw ()) (fun () ->
+      Eio.Fiber.fork_daemon ~sw:t.sw (fun () ->
         let rec aux () =
           if !stop then `Stop_daemon
           else begin
             (try
                await_event ~owner_name;
                refresh ();
-               Eio.Time.sleep (Current.Engine_env.clock ()) 10.0
+               Eio.Time.sleep t.clock 10.0
              with ex ->
                Log.err (fun f -> f "Anonymous.head thread failed: %a" Fmt.exn ex));
             aux ()
@@ -1100,7 +1115,7 @@ module Anonymous = struct
         Eio.Condition.broadcast cond
     in
     let pp f = Fmt.pf f "Query head of %a:%a" Repo_id.pp repo Ref.pp gref in
-    let monitor = Current.Monitor.create ~read ~watch ~pp in
+    let monitor = Current.Monitor.create ~sw:t.sw ~read ~watch ~pp in
     Current.component "%a:%a" Repo_id.pp repo Ref.pp gref |>
     let> () = Current.return () in
     Current.Monitor.get monitor
@@ -1123,13 +1138,18 @@ let webhook_secret_file =
     ~docv:"WEBHOOK_SECRET"
     ["github-webhook-secret-file"]
 
+type config = { token : string; webhook_secret : string }
+
 let make_config webhook_secret_file token_file =
-  let token = String.trim (read_file token_file) in
-  let webhook_secret = String.trim (read_file webhook_secret_file) in
-  of_oauth ~token ~webhook_secret
+  { token = String.trim (read_file token_file);
+    webhook_secret = String.trim (read_file webhook_secret_file) }
 
 let make_config_opt webhook_secret_file token_file =
   Option.map (make_config webhook_secret_file) token_file
+
+let create ~sw ~net ~clock { token; webhook_secret } =
+  let http = Current_http.create ~net in
+  of_oauth ~sw ~clock ~http ~token ~webhook_secret
 
 let cmdliner =
   Term.(const make_config $ webhook_secret_file $ Arg.required token_file)

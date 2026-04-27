@@ -76,7 +76,6 @@ let test env ?config ?final_stats ~name v actions =
   Docker.reset ();
   SVar.set selected (Ok v);
   let step = ref 1 in
-  Current_incr.propagate ();
   let trace ~next step_result =
     if !step = 0 then raise Exit;
     begin
@@ -119,9 +118,13 @@ let test env ?config ?final_stats ~name v actions =
   in
   try
     Eio.Switch.run (fun sw ->
-      Current.Engine_env.init ~sw ~env;
+      Docker.set_engine_sw sw;
+      (* Propagate the [SVar.set] inside the new engine's switch scope, so
+         any Monitor.create triggered by graph evaluation attaches to it
+         (rather than the previous test's now-closed switch). *)
+      Current_incr.propagate ();
       let _engine : Current.Engine.t =
-        Current.Engine.create ?config ~trace (fun () -> test_pipeline)
+        Current.Engine.create ~sw ~env ?config ~trace (fun () -> test_pipeline)
       in
       (* The engine runs as a daemon and keeps going until [trace] raises
          [Exit]; block here so the switch stays open until that happens. *)
@@ -135,10 +138,8 @@ let test_case_gc env name fn =
        nested switch for the engine's lifetime, but between tests, and for
        the post-test cleanup propagate, we need a live switch so that
        primitives torn down by previous pipelines can stop cleanly. *)
-    Eio.Switch.run (fun sw ->
-      Current.Engine_env.init ~sw ~env;
+    Eio.Switch.run (fun _sw ->
       fn env;
-      Current.Engine_env.init ~sw ~env;
       SVar.set selected (Error (`Msg "no-test"));
       Current_incr.propagate ());
     Gc.full_major ();

@@ -1,5 +1,15 @@
 type 'a or_error = ('a, [`Msg of string]) result
 
+(** Row-polymorphic Eio environment constraint. The engine extracts [clock],
+    [fs], [process_mgr] and [net] from this object; any value providing at
+    least these works (in particular [Eio_main.run]'s env passes directly,
+    and tests can supply mocks). *)
+type 'a env = (< clock : float Eio.Time.clock_ty Eio.Resource.t;
+                 fs : Eio.Fs.dir_ty Eio.Path.t;
+                 process_mgr : Eio_unix.Process.mgr_ty Eio.Resource.t;
+                 net : [`Generic | `Unix] Eio.Net.ty Eio.Resource.t;
+                 .. > as 'a)
+
 (** Direct-style error handling. Open [Current.Result.Syntax] in a plugin
     to use [let*], [let+] etc. on OCaml's [result] type. *)
 module Result = Current_term.Result
@@ -80,12 +90,16 @@ module Monitor : sig
   (** An ['a t] is a monitor that outputs values of type ['a]. *)
 
   val create :
+    sw:Eio.Switch.t ->
     read:(unit -> 'a or_error) ->
     watch:((unit -> unit) -> (unit -> unit)) ->
     pp:(Format.formatter -> unit) ->
     'a t
-  (** [create ~read ~watch ~pp] is a monitor that uses [read] to read the current
-      value of some external resource and [watch] to watch for changes.
+  (** [create ~sw ~read ~watch ~pp] is a monitor that uses [read] to read the
+      current value of some external resource and [watch] to watch for changes.
+      [~sw] is the switch on which the monitor's per-activation daemon is
+      spawned (typically the construction-time switch of the plugin that owns
+      this monitor).
       When the monitor is needed, it first calls [watch refresh] to start watching the
       resource. When this completes, it uses [read ()] to read the current value.
       Whenever the watch thread calls [refresh] it marks the value as being
@@ -147,22 +161,6 @@ module Unit : sig
   val unmarshal : string -> t
 end
 
-(** Pragmatic global stash for the engine's env and switch. [Engine.create]
-    requires that [Engine_env.init ~sw ~env] has been called first. Lower-level
-    modules (Job, Process, the cache) use this to access capabilities without
-    threading them through every signature. *)
-module Engine_env : sig
-  val init : sw:Eio.Switch.t -> env:Eio_unix.Stdenv.base -> unit
-  (** [init ~sw ~env] stashes the engine's switch and env. Call this before
-      {!Engine.create}. *)
-
-  val get_sw : unit -> Eio.Switch.t
-  val get_env : unit -> Eio_unix.Stdenv.base
-  val clock : unit -> float Eio.Time.clock_ty Eio.Resource.t
-  val process_mgr : unit -> Eio_unix.Process.mgr_ty Eio.Resource.t
-  val fs : unit -> Eio.Fs.dir_ty Eio.Path.t
-end
-
 (** Resource pools, to control how many jobs can use a resource at a time.
     To use a pool within a job, pass the pool to {!Job.start} or call {!Job.use_pool}. *)
 module Pool : sig
@@ -192,10 +190,15 @@ module Job : sig
   val create :
     ?priority:Pool.priority ->
     sw:Eio.Switch.t ->
+    clock:float Eio.Time.clock_ty Eio.Resource.t ->
+    process_mgr:Eio_unix.Process.mgr_ty Eio.Resource.t ->
+    fs:Eio.Fs.dir_ty Eio.Path.t ->
     label:string ->
     config:Config.t ->
     unit -> t
-  (** [create ~sw ~label ~config ()] is a new job.
+  (** [create ~sw ~clock ~process_mgr ~fs ~label ~config ()] is a new job.
+      The Eio capabilities ([clock], [process_mgr], [fs]) come from the
+      engine and are used by the job and {!Process.exec}.
       @param sw The job runs inside this switch; releasing it ends the job.
       @param priority Passed to the pool when {!start} is called. Default is [`Low].
       @param label A label to use in the job's filename (for debugging). *)
@@ -203,6 +206,13 @@ module Job : sig
   val switch : t -> Eio.Switch.t
   (** [switch t] is the Eio switch scoping the job's lifetime. Plugins can
       attach fibers and resources to it. *)
+
+  val clock : t -> float Eio.Time.clock_ty Eio.Resource.t
+  val process_mgr : t -> Eio_unix.Process.mgr_ty Eio.Resource.t
+  val fs : t -> Eio.Fs.dir_ty Eio.Path.t
+  (** Eio capabilities, inherited from {!Engine.create}'s [~env].
+      Plugin authors don't normally need these — {!Process.exec} pulls them
+      from the [~job] internally. *)
 
   val start : ?timeout:Duration.t -> ?pool:unit Pool.t -> level:Level.t -> t -> unit
   (** [start t ~level] marks [t] as running. This can only be called once per job.
@@ -298,21 +308,45 @@ module Engine : sig
   }
 
   val create :
+    sw:Eio.Switch.t ->
+    env:_ env ->
     ?config:Config.t ->
     ?trace:(next:unit Eio.Promise.t -> results -> unit) ->
     (unit -> unit term) ->
     t
-  (** [create pipeline] is a new engine running [pipeline].
-      The engine will evaluate [t]'s pipeline immediately, and again whenever
+  (** [create ~sw ~env pipeline] is a new engine running [pipeline].
+      The engine will evaluate the pipeline immediately, and again whenever
       one of its inputs changes.
 
-      The caller is responsible for initialising [Engine_env] (with the env
-      and switch) before invoking the engine. *)
+      [~sw] is the engine's switch; the engine forks its evaluation loop as a
+      daemon on it. [~env] supplies the Eio capabilities (clock, fs,
+      process_mgr, net) the engine and its subsystems need. *)
 
   val update : unit -> unit
   (** Primitives should call this after using {!Current_incr.change} to run
       another step of the engine loop. This will (asynchronously) call
       {!Current_incr.propagate} and perform any end-of-propagation activities. *)
+
+  val switch : t -> Eio.Switch.t
+  (** [switch t] is the engine's outer switch. Subsystems that need to fork
+      engine-lifetime fibers (or open a child switch under it) take this. *)
+
+  val clock : t -> float Eio.Time.clock_ty Eio.Resource.t
+  val fs : t -> Eio.Fs.dir_ty Eio.Path.t
+  val process_mgr : t -> Eio_unix.Process.mgr_ty Eio.Resource.t
+  val net : t -> [`Generic | `Unix] Eio.Net.ty Eio.Resource.t
+
+  val register_init :
+    (sw:Eio.Switch.t ->
+     clock:float Eio.Time.clock_ty Eio.Resource.t ->
+     process_mgr:Eio_unix.Process.mgr_ty Eio.Resource.t ->
+     fs:Eio.Fs.dir_ty Eio.Path.t ->
+     net:[`Generic | `Unix] Eio.Net.ty Eio.Resource.t ->
+     unit) -> unit
+  (** [register_init f] arranges for [f] to be called once when
+      [Engine.create] runs, with the engine's switch and capabilities.
+      Used by sibling libraries (e.g. {!Current_cache}) to wire themselves
+      into the engine without the caller having to do it explicitly. *)
 
   val state : t -> results
   (** The most recent results from evaluating the pipeline. *)

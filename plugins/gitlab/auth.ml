@@ -1,14 +1,21 @@
 module Server = Current_web.Utils.Server
 
-type t = {
+type config = {
   client_id : string;
   client_secret: string;
   scopes : string list;
   redirect_uri : string;
 } [@@deriving yojson]
 
-let v ?(scopes=["read_user"]) ~client_id ~client_secret ~redirect_uri () =
-  { client_id; client_secret; scopes; redirect_uri }
+type t = {
+  config : config;
+  http : Current_http.t;
+}
+
+let v ?(scopes=["read_user"]) ~http ~client_id ~client_secret ~redirect_uri () =
+  { config = { client_id; client_secret; scopes; redirect_uri }; http }
+
+let create ~net config = { config; http = Current_http.create ~net }
 
 (* Known GitLab OAuth scopes. See
    https://docs.gitlab.com/ee/integration/oauth_provider.html *)
@@ -24,12 +31,12 @@ let validate_scope scope =
   else raise @@ ScopeOfString ("Invalid OAuth scope: " ^ scope)
 
 let make_login_uri t ~csrf =
-  let scopes = String.concat " " (List.map validate_scope t.scopes) in
+  let scopes = String.concat " " (List.map validate_scope t.config.scopes) in
   Uri.with_query'
     (Uri.of_string "https://gitlab.com/oauth/authorize")
     [
-      "client_id", t.client_id;
-      "redirect_uri", t.redirect_uri;
+      "client_id", t.config.client_id;
+      "redirect_uri", t.config.redirect_uri;
       "response_type", "code";
       "state", csrf;
       "scope", scopes;
@@ -41,15 +48,15 @@ let get_access_token t code =
   let uri = Uri.of_string "https://gitlab.com/oauth/token" in
   let form =
     Uri.encoded_of_query [
-      "client_id",     [t.client_id];
-      "client_secret", [t.client_secret];
+      "client_id",     [t.config.client_id];
+      "client_secret", [t.config.client_secret];
       "code",          [code];
       "grant_type",    ["authorization_code"];
-      "redirect_uri",  [t.redirect_uri];
+      "redirect_uri",  [t.config.redirect_uri];
     ]
   in
   let headers = Cohttp.Header.init_with "Content-Type" "application/x-www-form-urlencoded" in
-  let resp, body = Current_http.post ~headers ~body:form uri in
+  let resp, body = Current_http.post t.http ~headers ~body:form uri in
   match Cohttp.Response.status resp with
   | `OK ->
     let json = Yojson.Safe.from_string body in
@@ -57,10 +64,10 @@ let get_access_token t code =
   | _ -> None
 
 (* GET https://gitlab.com/api/v4/user with the bearer token. *)
-let get_user token =
+let get_user t token =
   let headers = Cohttp.Header.init_with "Authorization" ("Bearer " ^ token) in
   let uri = Uri.of_string "https://gitlab.com/api/v4/user" in
-  let resp, body = Current_http.get ~headers uri in
+  let resp, body = Current_http.get t.http ~headers uri in
   match Cohttp.Response.status resp with
   | `OK ->
     let user = Gitlab_types_j.current_user_of_string body in
@@ -68,8 +75,8 @@ let get_user token =
   | status -> Error (status, body)
 
 let example_config () =
-  v ~client_id:"..." ~client_secret:"..." ~redirect_uri:"..." ()
-  |> to_yojson
+  { client_id = "..."; client_secret = "..."; scopes = ["read_user"]; redirect_uri = "..." }
+  |> config_to_yojson
   |> Yojson.Safe.pretty_to_string
 
 let configuration_howto ctx =
@@ -101,7 +108,7 @@ let login t : Current_web.Resource.t = object
           | None ->
             Server.respond_error ~status:`Internal_server_error ~body:"Failed to get token" ()
           | Some token ->
-            match get_user token with
+            match get_user t token with
             | Error (status, msg) ->
               Log.warn (fun f -> f "Failed to get user details from GitLab: %s: %s" (Cohttp.Code.string_of_status status) msg);
               Server.respond_error ~status:`Internal_server_error ~body:"Failed to get user details" ()
@@ -136,7 +143,7 @@ let make_config path =
   | exception ex -> Fmt.failwith "Invalid JSON in %s:@,%a" path Fmt.exn ex
   | json ->
     json
-    |> of_yojson
+    |> config_of_yojson
     |> function
     | Ok x -> x
     | Error msg ->

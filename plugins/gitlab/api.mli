@@ -39,14 +39,31 @@ module Ref_map : Map.S with type key = Ref.t
 type t
 type refs
 
-val of_oauth : token:string -> webhook_secret:string -> t
+val of_oauth :
+  sw:Eio.Switch.t ->
+  clock:float Eio.Time.clock_ty Eio.Resource.t ->
+  http:Current_http.t ->
+  token:string -> webhook_secret:string -> t
 val head_commit : t -> Repo_id.t -> Commit.t Current.t
 val refs : t -> Repo_id.t -> refs Current.Primitive.t
 val default_ref : refs -> Ref.t
 val webhook_secret : t -> string
+val sw : t -> Eio.Switch.t
+val clock : t -> float Eio.Time.clock_ty Eio.Resource.t
+val http : t -> Current_http.t
 val all_refs : refs -> Commit.t Ref_map.t
 val ci_refs : ?staleness:Duration.t -> t -> Repo_id.t -> Commit.t list Current.t
-val cmdliner : t Cmdliner.Term.t
+
+type config
+
+val cmdliner : config Cmdliner.Term.t
+
+val create :
+  sw:Eio.Switch.t ->
+  net:[`Generic | `Unix] Eio.Net.ty Eio.Resource.t ->
+  clock:float Eio.Time.clock_ty Eio.Resource.t ->
+  config -> t
+
 val webhook_secret_file : string Cmdliner.Term.t
 
 module Repo : sig
@@ -60,7 +77,15 @@ module Repo : sig
 end
 
 module Anonymous : sig
-  val head_of : Repo_id.t -> Ref.t -> Current_git.Commit_id.t Current.t
+  type t
+
+  val create :
+    sw:Eio.Switch.t ->
+    net:[`Generic | `Unix] Eio.Net.ty Eio.Resource.t ->
+    clock:float Eio.Time.clock_ty Eio.Resource.t ->
+    t
+
+  val head_of : t -> Repo_id.t -> Ref.t -> Current_git.Commit_id.t Current.t
 end
 
 (* Private API *)
@@ -85,5 +110,9 @@ type webhooks_accepted = [
 val input_webhook : webhooks_accepted -> unit
 (** [input_webhook] is called when a [webhook_accepted] request is made. *)
 
-val v : get_token:(unit -> token) -> webhook_secret:string -> unit -> t
+val v :
+  sw:Eio.Switch.t ->
+  clock:float Eio.Time.clock_ty Eio.Resource.t ->
+  http:Current_http.t ->
+  get_token:(unit -> token) -> webhook_secret:string -> unit -> t
 

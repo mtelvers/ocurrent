@@ -125,6 +125,8 @@ module Local = struct
 
   type t = {
     repo : Fpath.t;
+    sw : Eio.Switch.t;
+    process_mgr : Eio_unix.Process.mgr_ty Eio.Resource.t;
     head : [`Ref of string | `Commit of Commit_id.t] Current.Monitor.t;
     mutable heads : Commit.t Current.Monitor.t Ref_map.t;
   }
@@ -133,8 +135,7 @@ module Local = struct
 
   let read_reference t gref =
     let cmd = ["git"; "-C"; Fpath.to_string t.repo; "rev-parse"; "--revs-only"; gref] in
-    let mgr = Current.Engine_env.process_mgr () in
-    match Eio.Process.parse_out mgr Eio.Buf_read.take_all cmd with
+    match Eio.Process.parse_out t.process_mgr Eio.Buf_read.take_all cmd with
     | out ->
       (match String.trim out with
        | "" -> Fmt.error_msg "Unknown ref %S" gref
@@ -150,7 +151,7 @@ module Local = struct
       Fmt.failwith "Reference %S should start \"refs/\"" gref;
     let read () = read_reference t gref in
     let watch refresh =
-      let sw = Current.Engine_env.get_sw () in
+      let sw = t.sw in
       let watch_dir = Fpath.append dot_git (Fpath.v @@ Filename.dirname gref) in
       Log.debug (fun f -> f "Installing watch for %a" Fpath.pp watch_dir);
       let unwatch =
@@ -170,7 +171,7 @@ module Local = struct
     let pp f =
       Fmt.pf f "%a#%s" pp_repo t gref
     in
-    Current.Monitor.create ~read ~watch ~pp
+    Current.Monitor.create ~sw:t.sw ~read ~watch ~pp
 
   let commit_of_ref t gref =
     match Ref_map.find_opt gref t.heads with
@@ -211,11 +212,10 @@ module Local = struct
       | [_;r]  -> Ok (`Ref r)
       | _      -> Fmt.error_msg "Can't parse HEAD %S" contents
 
-  let make_head repo =
+  let make_head ~sw repo =
     let dot_git = Fpath.(repo / ".git") in
     let read () = read_head repo in
     let watch refresh =
-      let sw = Current.Engine_env.get_sw () in
       let watch_dir = dot_git in
       Log.debug (fun f -> f "Installing watch for %a" Fpath.pp watch_dir);
       let unwatch =
@@ -235,11 +235,11 @@ module Local = struct
     let pp f =
       Fmt.pf f "HEAD(%a)" Fpath.pp repo
     in
-    Current.Monitor.create ~read ~watch ~pp
+    Current.Monitor.create ~sw ~read ~watch ~pp
 
-  let v repo =
+  let v ~sw ~process_mgr repo =
     let repo = Fpath.normalize @@ Fpath.append (Fpath.v (Sys.getcwd ())) repo in
-    let head = make_head repo in
+    let head = make_head ~sw repo in
     let heads = Ref_map.empty in
-    { repo; head; heads }
+    { repo; sw; process_mgr; head; heads }
 end

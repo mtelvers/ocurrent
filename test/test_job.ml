@@ -11,17 +11,20 @@ let ( >>!= ) x f =
   | Ok y -> f y
   | Error `Msg m -> failwith m
 
-let with_engine_env env fn =
-  Eio.Switch.run (fun sw ->
-    Current.Engine_env.init ~sw ~env;
-    fn ())
+(* Each test takes [env] and capture the capabilities locally so [Job.create]
+   gets the same clock/process_mgr/fs the engine would in production. *)
+let create_job ~env ?priority ~sw ~label ~config () =
+  Job.create ?priority ~sw
+    ~clock:(Eio.Stdenv.clock env)
+    ~process_mgr:(Eio.Stdenv.process_mgr env)
+    ~fs:(Eio.Stdenv.fs env)
+    ~label ~config ()
 
 let streams env =
-  with_engine_env env @@ fun () ->
   Job.timestamp := (fun () -> 0.0);
   Eio.Switch.run @@ fun sw ->
   let config = Current.Config.v () in
-  let job = Job.create ~sw ~label:"streams" ~config () in
+  let job = create_job ~env ~sw ~label:"streams" ~config () in
   let cmd = ["sh"; "-c"; "echo out1; echo >&2 out2; echo out3"] in
   Current.Process.exec ~cancellable:true ~job cmd >>!= fun () ->
   let path = Job.log_path (Job.id job) |> Stdlib.Result.get_ok in
@@ -29,11 +32,10 @@ let streams env =
                                               out1\nout2\nout3\n" (read path)
 
 let output env =
-  with_engine_env env @@ fun () ->
   Job.timestamp := (fun () -> 0.0);
   Eio.Switch.run @@ fun sw ->
   let config = Current.Config.v () in
-  let job = Job.create ~sw ~label:"output" ~config () in
+  let job = create_job ~env ~sw ~label:"output" ~config () in
   let cmd = ["sh"; "-c"; "echo out1; echo >&2 out2; echo out3"] in
   Current.Process.check_output ~cancellable:true ~job cmd >>!= fun out ->
   Alcotest.(check string) "Output" "out1\nout3\n" out;
@@ -50,11 +52,10 @@ let pp_cmd ppf args =
   Current.Process.pp_cmd ppf (List.map remove_token args)
 
 let pp_command env =
-  with_engine_env env @@ fun () ->
   Job.timestamp := (fun () -> 0.0);
   Eio.Switch.run @@ fun sw ->
   let config = Current.Config.v () in
-  let job = Job.create ~sw ~label:"output" ~config () in
+  let job = create_job ~env ~sw ~label:"output" ~config () in
   let cmd = ["echo"; "token:abcdefgh"] in
   Current.Process.check_output ~pp_cmd ~cancellable:true ~job cmd >>!= fun out ->
   Alcotest.(check string) "Output" "token:abcdefgh\n" out;
@@ -62,11 +63,10 @@ let pp_command env =
   Alcotest.(check string) "Log" "1970-01-01 00:00.00: Exec: \"echo\" \"token:<TOKEN>\"\n" (read path)
 
 let cancel env =
-  with_engine_env env @@ fun () ->
   Job.timestamp := (fun () -> 0.0);
   Eio.Switch.run @@ fun sw ->
   let config = Current.Config.v () in
-  let job = Job.create ~sw ~label:"output" ~config () in
+  let job = create_job ~env ~sw ~label:"output" ~config () in
   let cmd = ["sleep"; "120"] in
   let res =
     Eio.Fiber.first
@@ -112,16 +112,15 @@ let fork_start ~sw ?pool ~level job =
   p
 
 let pool env =
-  with_engine_env env @@ fun () ->
   Eio.Switch.run @@ fun outer_sw ->
   let config = Current.Config.v () in
   let pool = Current.Pool.create ~label:"test" 1 in
   (* sw2 is outer (so sw1's release fires first). Fork order must still
      be job1 then job2 so job1 wins the pool slot. *)
   Eio.Switch.run @@ fun sw2 ->
-  let job2 = Job.create ~sw:sw2 ~label:"job-2" ~config () in
+  let job2 = create_job ~env ~sw:sw2 ~label:"job-2" ~config () in
   (Eio.Switch.run @@ fun sw1 ->
-   let job1 = Job.create ~sw:sw1 ~label:"job-1" ~config () in
+   let job1 = create_job ~env ~sw:sw1 ~label:"job-1" ~config () in
    let s1 = fork_start ~sw:outer_sw ~pool ~level:Current.Level.Harmless job1 in
    let s2 = fork_start ~sw:outer_sw ~pool ~level:Current.Level.Harmless job2 in
    Eio.Fiber.yield ();
@@ -134,12 +133,11 @@ let pool env =
   Alcotest.check start_state_t "Second job ready" Returned (observe s2)
 
 let pool_cancel env =
-  with_engine_env env @@ fun () ->
   Eio.Switch.run @@ fun outer_sw ->
   let config = Current.Config.v () in
   let pool = Current.Pool.create ~label:"test" 0 in
   Eio.Switch.run @@ fun sw1 ->
-  let job1 = Job.create ~sw:sw1 ~label:"job-1" ~config () in
+  let job1 = create_job ~env ~sw:sw1 ~label:"job-1" ~config () in
   let s1 = fork_start ~sw:outer_sw ~pool ~level:Current.Level.Harmless job1 in
   Alcotest.check start_state_t "Job queued" Pending (observe s1);
   Current.Job.cancel job1 "Cancel";
@@ -150,20 +148,19 @@ let pool_cancel env =
     (observe s1)
 
 let pool_priority env =
-  with_engine_env env @@ fun () ->
   Eio.Switch.run @@ fun outer_sw ->
   let config = Current.Config.v () in
   let pool = Current.Pool.create ~label:"test" 1 in
   (* Nest so sw1 closes first (releasing the slot), sw3 second (tested
      by s3 becoming Returned), sw2 last. Fork order: job1, job2, job3. *)
   Eio.Switch.run @@ fun sw2 ->
-  let job2 = Job.create ~sw:sw2 ~label:"job-2" ~config () in
+  let job2 = create_job ~env ~sw:sw2 ~label:"job-2" ~config () in
   let (s2, s3) =
     Eio.Switch.run @@ fun sw3 ->
-    let job3 = Job.create ~priority:`High ~sw:sw3 ~label:"job-3" ~config () in
+    let job3 = create_job ~env ~priority:`High ~sw:sw3 ~label:"job-3" ~config () in
     let s2, s3 =
       Eio.Switch.run @@ fun sw1 ->
-      let job1 = Job.create ~sw:sw1 ~label:"job-1" ~config () in
+      let job1 = create_job ~env ~sw:sw1 ~label:"job-1" ~config () in
       let s1 = fork_start ~sw:outer_sw ~pool ~level:Current.Level.Harmless job1 in
       let s2 = fork_start ~sw:outer_sw ~pool ~level:Current.Level.Harmless job2 in
       let s3 = fork_start ~sw:outer_sw ~pool ~level:Current.Level.Harmless job3 in

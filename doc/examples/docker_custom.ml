@@ -51,7 +51,7 @@ module Test = struct
     (* Start the container running: *)
     Raw.Cmd.with_container ~docker_context ~job ~kill_on_cancel:true (run image ~docker_context) @@ fun id ->
     Current.Job.log job "Waiting 1 second to let HTTP server start...";
-    Eio.Time.sleep (Eio.Stdenv.clock (Current.Engine_env.get_env ())) 1.0;
+    Eio.Time.sleep (Current.Job.clock job) 1.0;
     (* Test the container's service: *)
     Current.Process.exec ~cancellable:true ~job (exec id test_command ~docker_context)
 
@@ -87,10 +87,10 @@ let pipeline () =
 let main config mode =
   Eio_main.run @@ fun env ->
   Eio.Switch.run @@ fun sw ->
-  Current.Engine_env.init ~sw ~env;
-  let engine = Current.Engine.create ~config pipeline in
+  let net = Eio.Stdenv.net env in
+  let engine = Current.Engine.create ~sw ~env ~config pipeline in
   let site = Current_web.Site.(v ~has_role:allow_all) ~name:program_name (Current_web.routes engine) in
-  Current_web.run ~mode site
+  Current_web.run ~sw ~net ~mode site
 
 (* Command-line parsing *)
 

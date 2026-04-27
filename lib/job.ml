@@ -13,11 +13,24 @@ module Map = Map.Make(String)
 
 (* For unit-tests: *)
 let timestamp = ref Unix.gettimeofday
-let sleep : (float -> unit) ref =
-  ref (fun d -> Eio.Time.sleep (Engine_env.clock ()) d)
+
+(* [sleep] starts as an error sentinel. [Engine.create] installs the real
+   implementation (using its own clock) on first call, but only if the test
+   harness hasn't already overridden it (physical equality check on the
+   sentinel). *)
+let sleep_uninitialised _ =
+  failwith "Job.sleep called before Engine.create or test harness initialisation"
+let sleep : (float -> unit) ref = ref sleep_uninitialised
+
+let try_set_default_sleep clock =
+  if !sleep == sleep_uninitialised then
+    sleep := (fun d -> Eio.Time.sleep clock d)
 
 type t = {
   switch : Eio.Switch.t;
+  clock : float Eio.Time.clock_ty Eio.Resource.t;
+  fs : Eio.Fs.dir_ty Eio.Path.t;
+  process_mgr : Eio_unix.Process.mgr_ty Eio.Resource.t;
   config : Config.t;
   id : string;
   priority : Pool.priority;
@@ -103,7 +116,7 @@ let cancel t reason =
      | ex ->
        Fmt.failwith "Uncaught exception from cancel hook for %S: %a" (id t) Fmt.exn ex)
 
-let create ?(priority=`Low) ~sw ~label ~config () =
+let create ?(priority=`Low) ~sw ~clock ~process_mgr ~fs ~label ~config () =
   let jobs_dir = Lazy.force jobs_dir in
   let time = !timestamp () |> Unix.gmtime in
   let date =
@@ -126,7 +139,8 @@ let create ?(priority=`Low) ~sw ~label ~config () =
     let log_mutex = Eio.Mutex.create () in
     let explicit_confirm, set_explicit_confirm = Eio.Promise.create () in
     let cancel_hooks = `Hooks (Lwt_dllist.create ()) in
-    let t = { switch = sw; id; path = Some path; start_time; set_start_time; config; log_cond; log_mutex; cancel_hooks;
+    let t = { switch = sw; clock; process_mgr; fs;
+              id; path = Some path; start_time; set_start_time; config; log_cond; log_mutex; cancel_hooks;
               explicit_confirm; set_explicit_confirm; waiting_for_confirmation = false; priority } in
     jobs := Map.add id t !jobs;
     Prometheus.Gauge.inc_one Metrics.active_jobs;
@@ -148,6 +162,9 @@ let create ?(priority=`Low) ~sw ~label ~config () =
 let pp_id = Fmt.string
 
 let switch t = t.switch
+let clock t = t.clock
+let process_mgr t = t.process_mgr
+let fs t = t.fs
 
 let is_running t = Eio.Promise.is_resolved t.start_time
 

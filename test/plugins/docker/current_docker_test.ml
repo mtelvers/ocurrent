@@ -113,6 +113,15 @@ let image_monitors = Hashtbl.create 5
 let pulls_cond = Eio.Condition.create ()
 let pulls_mutex = Eio.Mutex.create ()
 
+(* Set by [Driver.test] from inside the engine's switch scope, so the mock's
+   image-pull monitors can fork on the right switch. *)
+let engine_sw_ref : Eio.Switch.t option ref = ref None
+let set_engine_sw sw = engine_sw_ref := Some sw
+let engine_sw () =
+  match !engine_sw_ref with
+  | Some sw -> sw
+  | None -> failwith "Driver.test must run before pulling images in the docker mock"
+
 let get_pull tag =
   match Hashtbl.find_opt image_pulls tag with
   | Some x -> x
@@ -128,7 +137,7 @@ let image_monitor tag =
     let read () = Eio.Promise.await (fst @@ get_pull tag) in
     let watch refresh =
       let stop = ref false in
-      Eio.Fiber.fork_daemon ~sw:(Current.Engine_env.get_sw ()) (fun () ->
+      Eio.Fiber.fork_daemon ~sw:(engine_sw ()) (fun () ->
         let rec aux () =
           if !stop then `Stop_daemon
           else begin
@@ -143,7 +152,7 @@ let image_monitor tag =
       fun () -> stop := true; Eio.Condition.broadcast pulls_cond
     in
     let pp f = Fmt.string f "docker pull" in
-    let x = Current.Monitor.create ~read ~watch ~pp in
+    let x = Current.Monitor.create ~sw:(engine_sw ()) ~read ~watch ~pp in
     Hashtbl.add image_monitors tag x;
     x
 

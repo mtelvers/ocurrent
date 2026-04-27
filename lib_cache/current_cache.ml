@@ -1,5 +1,32 @@
 module Job = Current.Job
 
+(** Engine-wired runtime context, used to fork per-slot switches and to
+    construct jobs. [Engine.create] calls [init] once at startup; the cache
+    machinery stays self-contained otherwise. *)
+module Runtime = struct
+  type t = {
+    sw : Eio.Switch.t;       (* parent of every slot switch *)
+    clock : float Eio.Time.clock_ty Eio.Resource.t;
+    process_mgr : Eio_unix.Process.mgr_ty Eio.Resource.t;
+    fs : Eio.Fs.dir_ty Eio.Path.t;
+  }
+
+  let runtime : t option ref = ref None
+
+  let init ~sw ~clock ~process_mgr ~fs =
+    runtime := Some { sw; clock; process_mgr; fs }
+
+  let get () =
+    match !runtime with
+    | Some r -> r
+    | None -> failwith "Current_cache.init has not been called (Engine.create wires this)"
+end
+
+let () =
+  Current.Engine.register_init
+    (fun ~sw ~clock ~process_mgr ~fs ~net:_ ->
+       Runtime.init ~sw ~clock ~process_mgr ~fs)
+
 module Metrics = struct
   open Prometheus
 
@@ -100,6 +127,8 @@ module Generic(Op : S.GENERIC) = struct
       mutable expires : (float * (unit -> unit)) option;  (* Time and cancel function. *)
       notify : unit Current_incr.var;       (* Async thread sets this to update results. *)
       release : unit -> unit;               (* Remove [t] from cache (call when inactive and ref-count = 0). *)
+      slot_sw : Eio.Switch.t;               (* Lifetime of this slot. Parent of all per-slot fibers
+                                               (job runner, expiry timer). Closed by [release]. *)
     }
 
     (* State model:
@@ -204,11 +233,18 @@ module Generic(Op : S.GENERIC) = struct
       let priority = if latched = None then `High else `Low in
       let key_digest = Op.Key.digest t.key in
       let job_id_ref = ref None in
-      Eio.Fiber.fork ~sw:(Current.Engine_env.get_sw ()) (fun () ->
+      let runtime = Runtime.get () in
+      Eio.Fiber.fork ~sw:t.slot_sw (fun () ->
         Fun.protect
           (fun () ->
              Eio.Switch.run (fun job_sw ->
-               let job = Job.create ~priority ~sw:job_sw ~label:Op.id ~config () in
+               let job =
+                 Job.create ~priority ~sw:job_sw
+                   ~clock:runtime.Runtime.clock
+                   ~process_mgr:runtime.Runtime.process_mgr
+                   ~fs:runtime.Runtime.fs
+                   ~label:Op.id ~config ()
+               in
                let job_id = Job.id job in
                job_id_ref := Some job_id;
                t.job_id <- Some job_id;
@@ -217,7 +253,7 @@ module Generic(Op : S.GENERIC) = struct
                t.op <- `Active (op, latched);
                let pp_op f = pp_op f (t.key, op.value) in
                Job.log job "New job: %t" pp_op;
-               Eio.Fiber.fork ~sw:(Current.Engine_env.get_sw ()) (fun () ->
+               Eio.Fiber.fork ~sw:t.slot_sw (fun () ->
                  let _ = Eio.Promise.await (Job.start_time job) in
                  Eio.Fiber.yield ();        (* Ensure we're outside any propagate *)
                  notify t
@@ -292,7 +328,7 @@ module Generic(Op : S.GENERIC) = struct
         let remaining_time = time -. !Job.timestamp () in
         let cancel_p, cancel_r = Eio.Promise.create () in
         let cancelled = ref false in
-        Eio.Fiber.fork ~sw:(Current.Engine_env.get_sw ()) (fun () ->
+        Eio.Fiber.fork ~sw:t.slot_sw (fun () ->
           let result =
             try
               Eio.Fiber.first
@@ -343,8 +379,28 @@ module Generic(Op : S.GENERIC) = struct
       | Some (_, cancel) -> cancel (); t.expires <- None
       | None -> ()
 
+    (* Open a fresh slot switch, parented under the runtime. The slot lives
+       until [release_r] is resolved; even after that, [Switch.run] still
+       waits for any child fibers (notably an in-flight job runner) before
+       closing. Returns the switch and the resolver that closes it. *)
+    let spawn_slot_switch () =
+      let runtime = Runtime.get () in
+      let sw_p, sw_r = Eio.Promise.create () in
+      let release_p, release_r = Eio.Promise.create () in
+      Eio.Fiber.fork_daemon ~sw:runtime.Runtime.sw (fun () ->
+        Eio.Switch.run (fun slot_sw ->
+          Eio.Promise.resolve sw_r slot_sw;
+          Eio.Promise.await release_p);
+        `Stop_daemon);
+      Eio.Promise.await sw_p, release_r
+
     (* Create a new in-memory instance, initialising it from the database. *)
     let load ~release ctx key desired =
+      let slot_sw, slot_release_r = spawn_slot_switch () in
+      let release () =
+        release ();
+        Eio.Promise.resolve slot_release_r ()
+      in
       let step_id = Current.Engine.Step.now () in
       let current, job_id, op, mtime, build_number =
         match Db.lookup ~op:Op.id (Op.Key.digest key) with
@@ -367,7 +423,8 @@ module Generic(Op : S.GENERIC) = struct
       in
       let notify = Current_incr.var () in
       { key; current; desired; ctx; op; job_id; last_set = step_id;
-        ref_count = 0; release; mtime; build_number; notify; expires = None }
+        ref_count = 0; release; mtime; build_number; notify; expires = None;
+        slot_sw }
 
     (* Register the actions for a resolved (non-active) instance.
        Report it as changed when a rebuild is requested (manually or via the schedule). *)

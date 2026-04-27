@@ -180,6 +180,9 @@ type t = {
   get_token : unit -> token;
   webhook_secret : string;  (* Shared secret for validating webhooks from GitLab *)
   token_lock : Eio.Mutex.t;
+  sw : Eio.Switch.t;
+  clock : float Eio.Time.clock_ty Eio.Resource.t;
+  http : Current_http.t;
   mutable token : token;
   mutable head_monitors : commit Current.Monitor.t Repo_map.t;
   mutable refs_monitors : refs Current.Monitor.t Repo_map.t;
@@ -191,20 +194,24 @@ and refs = {
 }
 
 let webhook_secret t = t.webhook_secret
+let sw t = t.sw
+let clock t = t.clock
+let http t = t.http
 
 let default_ref t = t.default_ref
 
 let all_refs t = t.all_refs
 
-let v ~get_token ~webhook_secret () =
+let v ~sw ~clock ~http ~get_token ~webhook_secret () =
   let head_monitors = Repo_map.empty in
   let refs_monitors = Repo_map.empty in
   let token_lock = Eio.Mutex.create () in
-  { get_token; token_lock; token = no_token; head_monitors; refs_monitors; webhook_secret }
+  { get_token; token_lock; token = no_token; head_monitors; refs_monitors; webhook_secret;
+    sw; clock; http }
 
-let of_oauth ~token ~webhook_secret =
+let of_oauth ~sw ~clock ~http ~token ~webhook_secret =
   let get_token () = { token = Ok token; expiry = None} in
-  v ~get_token ~webhook_secret ()
+  v ~sw ~clock ~http ~get_token ~webhook_secret ()
 
 let get_token t =
   Eio.Mutex.use_rw ~protect:false t.token_lock @@ fun () ->
@@ -241,23 +248,23 @@ module Gl = struct
     | None -> h
     | Some t -> Cohttp.Header.add h "Authorization" ("Bearer " ^ t)
 
-  let get ?token path =
+  let get ~http ?token path =
     let uri = Uri.of_string (api_base ^ path) in
-    Current_http.get ~headers:(auth_headers ?token ()) uri
+    Current_http.get http ~headers:(auth_headers ?token ()) uri
 
-  let project_by_id ?token project_id () : Gitlab_types_t.project_short option =
-    let resp, body = get ?token (Printf.sprintf "/projects/%d" project_id) in
+  let project_by_id ~http ?token project_id () : Gitlab_types_t.project_short option =
+    let resp, body = get ~http ?token (Printf.sprintf "/projects/%d" project_id) in
     match Cohttp.Response.status resp with
     | `OK -> Some (Gitlab_types_j.project_short_of_string body)
     | `Not_found -> None
     | err -> Fmt.failwith "GitLab project_by_id %d: %s" project_id
                (Cohttp.Code.string_of_status err)
 
-  let branch ?token ~project_id ~branch_name () : Gitlab_types_t.branch_full =
+  let branch ~http ?token ~project_id ~branch_name () : Gitlab_types_t.branch_full =
     let resp, body =
-      get ?token (Printf.sprintf "/projects/%d/repository/branches/%s"
-                    project_id
-                    (Uri.pct_encode ~component:`Path branch_name))
+      get ~http ?token (Printf.sprintf "/projects/%d/repository/branches/%s"
+                          project_id
+                          (Uri.pct_encode ~component:`Path branch_name))
     in
     match Cohttp.Response.status resp with
     | `OK -> Gitlab_types_j.branch_full_of_string body
@@ -265,10 +272,10 @@ module Gl = struct
 
   (* Simple paginator: GitLab uses page/per_page query params; follow the
      Link: next header until exhausted. *)
-  let paginate ?token ~parse path =
+  let paginate ~http ?token ~parse path =
     let rec loop uri acc =
       let resp, body =
-        Current_http.get ~headers:(auth_headers ?token ()) uri
+        Current_http.get http ~headers:(auth_headers ?token ()) uri
       in
       match Cohttp.Response.status resp with
       | `OK ->
@@ -292,26 +299,26 @@ module Gl = struct
     in
     loop uri []
 
-  let branches ?token ~project_id () : Gitlab_types_t.branch_full list =
-    paginate ?token
+  let branches ~http ?token ~project_id () : Gitlab_types_t.branch_full list =
+    paginate ~http ?token
       ~parse:Gitlab_types_j.branches_full_of_string
       (Printf.sprintf "/projects/%d/repository/branches" project_id)
 
-  let merge_requests_opened ?token ~project_id () : Gitlab_types_t.merge_request list =
+  let merge_requests_opened ~http ?token ~project_id () : Gitlab_types_t.merge_request list =
     let path = Printf.sprintf "/projects/%d/merge_requests?state=opened" project_id in
-    paginate ?token ~parse:Gitlab_types_j.merge_requests_of_string path
+    paginate ~http ?token ~parse:Gitlab_types_j.merge_requests_of_string path
 
-  let merge_request ?token ~project_id ~iid () : Gitlab_types_t.merge_request =
+  let merge_request ~http ?token ~project_id ~iid () : Gitlab_types_t.merge_request =
     let resp, body =
-      get ?token (Printf.sprintf "/projects/%d/merge_requests/%s" project_id iid)
+      get ~http ?token (Printf.sprintf "/projects/%d/merge_requests/%s" project_id iid)
     in
     match Cohttp.Response.status resp with
     | `OK -> Gitlab_types_j.merge_request_of_string body
     | err -> Fmt.failwith "GitLab merge_request: %s" (Cohttp.Code.string_of_status err)
 
-  let latest_commit_on_ref ?token ~project_id ~ref_name () : string =
+  let latest_commit_on_ref ~http ?token ~project_id ~ref_name () : string =
     let resp, body =
-      get ?token
+      get ~http ?token
         (Printf.sprintf "/projects/%d/repository/commits?ref_name=%s&per_page=1"
            project_id (Uri.pct_encode ~component:`Query_value ref_name))
     in
@@ -322,7 +329,7 @@ module Gl = struct
        | [] -> Fmt.failwith "GitLab: no commits found for ref %S" ref_name)
     | err -> Fmt.failwith "GitLab latest_commit_on_ref: %s" (Cohttp.Code.string_of_status err)
 
-  let set_commit_status ~token ~project_id ~sha (status : Gitlab_types_t.new_status) =
+  let set_commit_status ~http ~token ~project_id ~sha (status : Gitlab_types_t.new_status) =
     let body = Gitlab_types_j.string_of_new_status status in
     let headers = auth_headers ~token () in
     let headers = Cohttp.Header.add headers "Content-Type" "application/json" in
@@ -330,7 +337,7 @@ module Gl = struct
       Uri.of_string
         (Printf.sprintf "%s/projects/%d/statuses/%s" api_base project_id sha)
     in
-    let resp, body = Current_http.post ~headers ~body uri in
+    let resp, body = Current_http.post http ~headers ~body uri in
     match Cohttp.Response.status resp with
     | `OK | `Created -> Gitlab_types_j.commit_status_of_string body
     | err ->
@@ -339,13 +346,13 @@ module Gl = struct
 end
 
 (* Get latest Git ref for the default branch in GitLab. *)
-let get_default_ref _t (repo_id : Repo_id.t) =
+let get_default_ref t (repo_id : Repo_id.t) =
   let prefix = "refs/heads/" in
-  match Gl.project_by_id repo_id.project_id () with
+  match Gl.project_by_id ~http:t.http repo_id.project_id () with
   | None -> raise (Project_not_found repo_id.project_id)
   | Some project ->
     let branch_name = project.project_short_default_branch in
-    let b = Gl.branch ~project_id:project.project_short_id ~branch_name () in
+    let b = Gl.branch ~http:t.http ~project_id:project.project_short_id ~branch_name () in
     let c = b.Gitlab_types_t.branch_full_commit in
     { Commit_id.repo = repo_id
     ; id = `Ref (prefix ^ branch_name)
@@ -361,14 +368,14 @@ let make_head_commit_monitor t repo =
   let watch refresh =
     let owner_name = Fmt.str "%a" Repo_id.to_git repo in
     let stop = ref false in
-    Eio.Fiber.fork_daemon ~sw:(Current.Engine_env.get_sw ()) (fun () ->
+    Eio.Fiber.fork_daemon ~sw:t.sw (fun () ->
       let rec aux () =
         if !stop then `Stop_daemon
         else begin
           (try
              await_event ~owner_name;
              refresh ();
-             Eio.Time.sleep (Current.Engine_env.clock ()) 10.0   (* Limit updates to 1 per 10 seconds *)
+             Eio.Time.sleep t.clock 10.0   (* Limit updates to 1 per 10 seconds *)
            with ex ->
              Log.err (fun f -> f "head_commit thread failed: %a" Fmt.exn ex));
           aux ()
@@ -382,7 +389,7 @@ let make_head_commit_monitor t repo =
       Eio.Condition.broadcast cond
   in
   let pp f = Fmt.pf f "Watch %a default ref head" Repo_id.pp repo in
-  Current.Monitor.create ~read ~watch ~pp
+  Current.Monitor.create ~sw:t.sw ~read ~watch ~pp
 
 let head_commit t repo =
   Current.component "%a head" Repo_id.pp repo |>
@@ -456,7 +463,7 @@ module Commit = struct
              ; pipeline_id = None
              }
            in
-           let _ = Gl.set_commit_status ~token ~project_id ~sha new_status in
+           let _ = Gl.set_commit_status ~http:t.http ~token ~project_id ~sha new_status in
            Ok ()
          with ex ->
            Log.err (fun f -> f "@[<v2>%a failed: %a@]"
@@ -498,9 +505,9 @@ module Commit = struct
   let branch_name (_, id) = Commit_id.branch_name id
 end
 
-let exec_query token project_id =
-  let merge_requests = Gl.merge_requests_opened ~token ~project_id () in
-  let branches = Gl.branches ~token ~project_id () in
+let exec_query ~http token project_id =
+  let merge_requests = Gl.merge_requests_opened ~http ~token ~project_id () in
+  let branches = Gl.branches ~http ~token ~project_id () in
   let default_branch = List.find (fun br -> br.Gitlab_types_t.branch_full_default) branches in
   (default_branch, branches, merge_requests)
 
@@ -538,7 +545,7 @@ let get_refs t (repo : Repo_id.t) =
   match get_token t with
   | Error (`Msg m) -> failwith m
   | Ok token ->
-    let default_branch, branches, prs = exec_query token repo.project_id in
+    let default_branch, branches, prs = exec_query ~http:t.http token repo.project_id in
     let prefix = "refs/heads/" in
     let refs = List.map (parse_ref ~repo ~prefix) branches in
     let prs = List.map (parse_merge_request ~repo ~branches) prs in
@@ -565,14 +572,14 @@ let make_refs_monitor t repo =
   let watch refresh =
     let owner_name = Fmt.str "%a" Repo_id.to_git repo in
     let stop = ref false in
-    Eio.Fiber.fork_daemon ~sw:(Current.Engine_env.get_sw ()) (fun () ->
+    Eio.Fiber.fork_daemon ~sw:t.sw (fun () ->
       let rec aux () =
         if !stop then `Stop_daemon
         else begin
           (try
              await_event ~owner_name;
              refresh ();
-             Eio.Time.sleep (Current.Engine_env.clock ()) 10.0   (* Limit updates to 1 per 10 seconds *)
+             Eio.Time.sleep t.clock 10.0   (* Limit updates to 1 per 10 seconds *)
            with ex ->
              Log.err (fun f -> f "refs thread failed: %a" Fmt.exn ex));
           aux ()
@@ -586,7 +593,7 @@ let make_refs_monitor t repo =
       Eio.Condition.broadcast cond
   in
   let pp f = Fmt.pf f "Watch %a CI refs" Repo_id.pp repo in
-  Current.Monitor.create ~read ~watch ~pp
+  Current.Monitor.create ~sw:t.sw ~read ~watch ~pp
 
 let refs t repo =
   Current.Monitor.get (
@@ -669,22 +676,29 @@ module Repo = struct
 end
 
 module Anonymous = struct
+  type t = {
+    sw : Eio.Switch.t;
+    clock : float Eio.Time.clock_ty Eio.Resource.t;
+    http : Current_http.t;
+  }
 
-  let query_head (repo : Repo_id.t) (gref : Ref.t) =
+  let create ~sw ~net ~clock = { sw; clock; http = Current_http.create ~net }
+
+  let query_head t (repo : Repo_id.t) (gref : Ref.t) =
     let project_id = repo.project_id in
     match gref with
     | `Ref the_ref ->
-      Gl.latest_commit_on_ref ~project_id ~ref_name:the_ref ()
+      Gl.latest_commit_on_ref ~http:t.http ~project_id ~ref_name:the_ref ()
     | `MR mr_no ->
-      let mr = Gl.merge_request ~project_id ~iid:(string_of_int mr_no.id) () in
+      let mr = Gl.merge_request ~http:t.http ~project_id ~iid:(string_of_int mr_no.id) () in
       (* TODO: Recover if the merge request does not have a SHA *)
       Option.get mr.Gitlab_types_t.merge_request_sha
 
-  let head_of (repo : Repo_id.t) (gref : Ref.t)=
+  let head_of t (repo : Repo_id.t) (gref : Ref.t)=
     let owner_name = Fmt.str "%a" Repo_id.to_git repo in
     let read () =
       try
-        let hash = query_head repo gref in
+        let hash = query_head t repo gref in
         let id = { Commit_id.repo; hash; id = gref; committed_date = "" ; message = ""} in
         Ok (Commit_id.to_git id)
       with ex ->
@@ -693,14 +707,14 @@ module Anonymous = struct
     in
     let watch refresh =
       let stop = ref false in
-      Eio.Fiber.fork_daemon ~sw:(Current.Engine_env.get_sw ()) (fun () ->
+      Eio.Fiber.fork_daemon ~sw:t.sw (fun () ->
         let rec aux () =
           if !stop then `Stop_daemon
           else begin
             (try
                await_event ~owner_name;
                refresh ();
-               Eio.Time.sleep (Current.Engine_env.clock ()) 10.0
+               Eio.Time.sleep t.clock 10.0
              with ex ->
                Log.err (fun f -> f "Anonymous.head thread failed: %a" Fmt.exn ex));
             aux ()
@@ -714,7 +728,7 @@ module Anonymous = struct
         Eio.Condition.broadcast cond
     in
     let pp f = Fmt.pf f "Query head of %a:%a" Repo_id.pp repo Ref.pp gref in
-    let monitor = Current.Monitor.create ~read ~watch ~pp in
+    let monitor = Current.Monitor.create ~sw:t.sw ~read ~watch ~pp in
     Current.component "%a:%a" Repo_id.pp repo Ref.pp gref |>
     let> () = Current.return () in
     Current.Monitor.get monitor
@@ -738,10 +752,15 @@ let webhook_secret_file =
     ~docv:"WEBHOOK_SECRET"
     ["gitlab-webhook-secret-file"]
 
+type config = { token : string; webhook_secret : string }
+
 let make_config token_file webhook_secret_file =
-  let token = String.trim (read_file token_file) in
-  let webhook_secret = String.trim (read_file webhook_secret_file) in
-  of_oauth ~token ~webhook_secret
+  { token = String.trim (read_file token_file);
+    webhook_secret = String.trim (read_file webhook_secret_file) }
+
+let create ~sw ~net ~clock { token; webhook_secret } =
+  let http = Current_http.create ~net in
+  of_oauth ~sw ~clock ~http ~token ~webhook_secret
 
 let cmdliner =
   Term.(const make_config $ token_file $ webhook_secret_file)

@@ -182,8 +182,13 @@ module Api : sig
 
   module Ref_map : Map.S with type key = Ref.t
 
-  val of_oauth : token:string -> webhook_secret:string -> t
-  (** [of_oauth ~token ~webhook_secret] is a configuration that authenticates to GitHub using [token]. *)
+  val of_oauth :
+    sw:Eio.Switch.t ->
+    clock:float Eio.Time.clock_ty Eio.Resource.t ->
+    http:Current_http.t ->
+    token:string -> webhook_secret:string -> t
+  (** [of_oauth ~sw ~clock ~http ~token ~webhook_secret] is a configuration
+      that authenticates to GitHub using [token]. *)
 
   val exec_graphql : ?variables:(string * Yojson.Safe.t) list -> t -> string -> Yojson.Safe.t
   (** [exec_graphql t query] executes [query] on GitHub. *)
@@ -251,17 +256,35 @@ module Api : sig
 
   (** Perform Anonymous request to GitHub. *)
   module Anonymous : sig
-    val head_of : Repo_id.t -> Ref.t -> Current_git.Commit_id.t Current.t
-    (** [head_of repo ref] is the head commit of [repo]/[ref]. No API token is used to access this,
+    type t
+
+    val create :
+      sw:Eio.Switch.t ->
+      net:[`Generic | `Unix] Eio.Net.ty Eio.Resource.t ->
+      clock:float Eio.Time.clock_ty Eio.Resource.t ->
+      t
+
+    val head_of : t -> Repo_id.t -> Ref.t -> Current_git.Commit_id.t Current.t
+    (** [head_of t repo ref] is the head commit of [repo]/[ref]. No API token is used to access this,
         so it only works for public repositories. You are responsible for adding a web-hook so
         that [input_webhook] gets called whenever the commit changes. *)
   end
 
-  val cmdliner : t Cmdliner.Term.t
+  type config
+
+  val cmdliner : config Cmdliner.Term.t
   (** Command-line options to generate a GitHub configuration. *)
 
-  val cmdliner_opt : t option Cmdliner.Term.t
+  val cmdliner_opt : config option Cmdliner.Term.t
   (** Like [cmdliner], but the argument is optional. *)
+
+  val create :
+    sw:Eio.Switch.t ->
+    net:[`Generic | `Unix] Eio.Net.ty Eio.Resource.t ->
+    clock:float Eio.Time.clock_ty Eio.Resource.t ->
+    config -> t
+  (** [create ~sw ~net ~clock config] activates [config] inside the engine's
+      Eio scope. *)
 end
 
 (** Installation of a GitHub application. *)
@@ -289,16 +312,27 @@ end
 
 (** A GitHub Application. *)
 module App : sig
+  type config
+  (** Pure configuration produced at Cmdliner-parse time. *)
+
   type t
-  (** Configuration for a GitHub application. *)
+  (** A live GitHub application activated inside the engine's Eio scope. *)
+
+  val create :
+    sw:Eio.Switch.t ->
+    net:[`Generic | `Unix] Eio.Net.ty Eio.Resource.t ->
+    clock:float Eio.Time.clock_ty Eio.Resource.t ->
+    config -> t
+  (** [create ~sw ~net ~clock config] activates [config] inside the engine's
+      Eio scope. The install-monitor daemon is forked on [~sw]. *)
 
   val webhook_secret : t -> string
   (** Webhook secret to validate payloads from GitHub. *)
 
-  val cmdliner : t Cmdliner.Term.t
+  val cmdliner : config Cmdliner.Term.t
   (** Command-line options to generate a GitHub app configuration. *)
 
-  val cmdliner_opt : t option Cmdliner.Term.t
+  val cmdliner_opt : config option Cmdliner.Term.t
   (** Like [cmdliner], but the arguments are all optional. *)
 
   val installation : t -> account:string -> int -> Installation.t
@@ -314,11 +348,20 @@ end
 
 (** Use GitHub to authenticate users. *)
 module Auth : sig
-  type t
-  (** Configuration for GitHub OAuth single-sign-on. *)
+  type config
+  (** Pure OAuth configuration loaded from JSON; no network capability. *)
 
-  val v : ?scopes:string list -> client_id:string -> client_secret:string -> unit -> t
+  type t
+  (** A live OAuth configuration with an HTTPS client. *)
+
+  val v :
+    ?scopes:string list ->
+    http:Current_http.t ->
+    client_id:string -> client_secret:string -> unit -> t
   (** Create a configuration using the details provided by GitHub. *)
+
+  val create : net:_ Eio.Net.t -> config -> t
+  (** [create ~net config] activates [config] with an HTTPS client. *)
 
   val make_login_uri : t -> csrf:string -> Uri.t
   (** Use this as your [~authn] in {!Current_web.Site.v}. *)
@@ -328,6 +371,6 @@ module Auth : sig
       configured when you set up your GitHub OAuth app.
       If [t = None] then the page will tell you how to configure it. *)
 
-  val cmdliner : t option Cmdliner.Term.t
+  val cmdliner : config option Cmdliner.Term.t
   (** Get the configuration from the command-line. *)
 end

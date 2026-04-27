@@ -43,12 +43,18 @@ let watch update =
 
 let pp f = Fmt.string f "watch"
 
-let monitor = Current.Monitor.create ~read ~watch ~pp
+(* The monitor needs an [Eio.Switch.t] to attach activations to; build it
+   inside [basic] and stash here so [test_pipeline] can reach it. *)
+let monitor : (string Current.Monitor.t) option ref = ref None
+let get_monitor () =
+  match !monitor with
+  | Some m -> m
+  | None -> failwith "test_monitor: monitor not yet constructed"
 
 let input () =
   Current.component "input" |>
   let> () = Current.return () in
-  Current.Monitor.get monitor
+  Current.Monitor.get (get_monitor ())
 
 module Bool_var = Current.Var(struct type t = bool let pp = Fmt.bool let equal = (=) end)
 
@@ -150,9 +156,9 @@ let basic env =
   let step = ref 0 in
   try
     Eio.Switch.run (fun sw ->
-      Current.Engine_env.init ~sw ~env;
+      monitor := Some (Current.Monitor.create ~sw ~read ~watch ~pp);
       let _engine : Current.Engine.t =
-        Current.Engine.create test_pipeline ~trace:(trace step)
+        Current.Engine.create ~sw ~env test_pipeline ~trace:(trace step)
       in
       Eio.Fiber.await_cancel ())
   with Exit -> ()

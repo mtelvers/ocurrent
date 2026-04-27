@@ -62,8 +62,13 @@ module Local : sig
   type t
   (** A local Git repository. *)
 
-  val v : Fpath.t -> t
-  (** [v path] is the local Git repository at [path]. *)
+  val v :
+    sw:Eio.Switch.t ->
+    process_mgr:Eio_unix.Process.mgr_ty Eio.Resource.t ->
+    Fpath.t -> t
+  (** [v ~sw ~process_mgr path] is the local Git repository at [path].
+      [~sw] scopes the fs-watcher fibers; [~process_mgr] is used to spawn
+      [git] subprocesses. *)
 
   val head : t -> [`Commit of Commit_id.t | `Ref of string ] Current.t
   (** [head] is the current branch ref (e.g. "/refs/heads/master"). *)

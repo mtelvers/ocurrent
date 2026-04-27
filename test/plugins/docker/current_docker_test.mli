@@ -25,6 +25,10 @@ val complete_pull : string -> Image.t Current.or_error -> unit
 val update_pull : string -> unit
 (** [update_pull tag] checks for updates to [tag] in the background. *)
 
+val set_engine_sw : Eio.Switch.t -> unit
+(** Test plumbing: the mock forks image-pull monitors on this switch.
+    {!Driver.test} calls this once it has the engine's switch. *)
+
 val reset : unit -> unit
 (** Reset state for tests. *)
 

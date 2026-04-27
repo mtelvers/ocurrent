@@ -27,18 +27,20 @@ let has_role user role =
     | _, (`Viewer | `Builder) -> true   (* Any GitLab user can cancel and rebuild *)
     | _ -> false
 
-let main config mode repo auth =
+let main config mode repo auth_config =
   Eio_main.run @@ fun env ->
   Eio.Switch.run @@ fun sw ->
-  Current.Engine_env.init ~sw ~env;
-  let repo = Git.Local.v (Fpath.v repo) in
-  let engine = Current.Engine.create ~config (pipeline ~repo) in
+  let net = Eio.Stdenv.net env in
+  let process_mgr = Eio.Stdenv.process_mgr env in
+  let auth = Option.map (Current_gitlab.Auth.create ~net) auth_config in
+  let repo = Git.Local.v ~sw ~process_mgr (Fpath.v repo) in
+  let engine = Current.Engine.create ~sw ~env ~config (pipeline ~repo) in
   let authn = Option.map Current_gitlab.Auth.make_login_uri auth in
   let routes =
     Routes.(s "login" /? nil @--> Current_gitlab.Auth.login auth) ::
     Current_web.routes engine in
   let site = Current_web.Site.v ?authn ~has_role ~name:program_name routes in
-  Current_web.run ~mode site
+  Current_web.run ~sw ~net ~mode site
 
 (* Command-line parsing *)
 

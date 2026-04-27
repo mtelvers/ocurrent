@@ -57,18 +57,20 @@ let pipeline ~gitlab ~repo_id () =
   |> Current.map gitlab_status_of_state
   |> Gitlab.Api.Commit.set_status head program_name
 
-let main config mode gitlab repo =
+let main config mode gitlab_config repo =
   Eio_main.run @@ fun env ->
   Eio.Switch.run @@ fun sw ->
-  Current.Engine_env.init ~sw ~env;
+  let net = Eio.Stdenv.net env in
+  let clock = Eio.Stdenv.clock env in
+  let gitlab = Gitlab.Api.create ~sw ~net ~clock gitlab_config in
   let has_role = Current_web.Site.allow_all in
-  let engine = Current.Engine.create ~config (pipeline ~gitlab ~repo_id:repo) in
+  let engine = Current.Engine.create ~sw ~env ~config (pipeline ~gitlab ~repo_id:repo) in
   let routes =
     Routes.(s "webhooks" / s "gitlab" /? nil @--> Gitlab.webhook ~webhook_secret:(Gitlab.Api.webhook_secret gitlab)) ::
     Current_web.routes engine
   in
   let site = Current_web.Site.(v ~has_role) ~name:program_name routes in
-  Current_web.run ~mode site
+  Current_web.run ~sw ~net ~mode site
 
 (* Command-line parsing *)
 

@@ -1,4 +1,7 @@
-type t = Uri.t
+type t = {
+  uri : Uri.t;
+  http : Current_http.t;
+}
 
 let id = "slack-post"
 
@@ -13,7 +16,7 @@ let publish t job _key message =
     `Assoc [ "text", `String message ]
     |> Yojson.to_string
   in
-  let resp, _body = Current_http.post ~headers ~body t in
+  let resp, _body = Current_http.post t.http ~headers ~body t.uri in
   match Cohttp.Response.status resp with
   | `OK -> Ok ()
   | err ->

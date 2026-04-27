@@ -1,4 +1,4 @@
-let render_svg ctx a =
+let render_svg ~process_mgr ctx a =
   let uri = Context.uri ctx in
   let env = Uri.query uri |> List.filter_map (function
       | (_, []) -> None
@@ -14,7 +14,7 @@ let render_svg ctx a =
   in
   let dotfile = Fmt.to_to_string (Current.Analysis.pp_dot ~env ~collapse_link ~job_info) a in
   Eio.Switch.run @@ fun sw ->
-  let mgr = Current.Engine_env.process_mgr () in
+  let mgr = process_mgr in
   let stdin_r, stdin_w = Eio.Process.pipe ~sw mgr in
   let stdout_r, stdout_w = Eio.Process.pipe ~sw mgr in
   let proc =
@@ -44,7 +44,8 @@ let r ~engine = object
   val! can_get = `Viewer
 
   method! private get ctx =
-    match render_svg ctx (Current.Engine.pipeline engine) with
+    let process_mgr = Current.Engine.process_mgr engine in
+    match render_svg ~process_mgr ctx (Current.Engine.pipeline engine) with
     | Ok body ->
       let headers = Cohttp.Header.init_with "Content-Type" "image/svg+xml" in
       Utils.Server.respond_string ~status:`OK ~headers ~body ()

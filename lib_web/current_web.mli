@@ -143,8 +143,10 @@ type t =
   { host : string option;
     port : int }
 
-val run : ?mode:t -> Site.t -> 'a
-(** [run ~mode site] runs a web-server (with configuration [mode]) that handles incoming requests for [site].
-    Blocks the calling fiber until the server stops. Requires {!Current.Engine_env} to be initialised. *)
+val run : sw:Eio.Switch.t -> net:_ Eio.Net.t -> ?mode:t -> Site.t -> 'a
+(** [run ~sw ~net ?mode site] runs a web server (with configuration [mode])
+    that handles incoming requests for [site]. The listening socket is
+    attached to [~sw]; outbound network capabilities come from [~net].
+    Blocks the calling fiber until the server stops. *)
 
 val cmdliner : t Cmdliner.Term.t

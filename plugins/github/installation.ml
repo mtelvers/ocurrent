@@ -49,7 +49,7 @@ let list_repositories ~api ~token ~account =
   let headers = Cohttp.Header.add headers "accept" "application/vnd.github.machine-man-preview+json" in
   let rec aux uri =
     Log.debug (fun f -> f "Get repositories for %S from %a" account Uri.pp uri);
-    let resp, body = Current_http.get ~headers uri in
+    let resp, body = Current_http.get (Api.http api) ~headers uri in
     match Cohttp.Response.status resp with
     | `OK ->
       let json = Yojson.Safe.from_string body in
@@ -89,12 +89,12 @@ let v ~iid ~account ~api =
       try Ok (list_repositories ~api ~token ~account)
       with ex ->
         Log.warn (fun f -> f "Error reading GitHub installations (will retry in 30s): %a" Fmt.exn ex);
-        Eio.Time.sleep (Current.Engine_env.clock ()) 30.0;
+        Eio.Time.sleep (Api.clock api) 30.0;
         Ok (list_repositories ~api ~token ~account)
   in
   let watch refresh =
     let stop = ref false in
-    Eio.Fiber.fork_daemon ~sw:(Current.Engine_env.get_sw ()) (fun () ->
+    Eio.Fiber.fork_daemon ~sw:(Api.sw api) (fun () ->
       let rec aux () =
         if !stop then `Stop_daemon
         else begin
@@ -111,7 +111,7 @@ let v ~iid ~account ~api =
       Eio.Condition.broadcast installation_repositories_cond
   in
   let pp f = Fmt.string f account in
-  let repos = Current.Monitor.create ~read ~watch ~pp in
+  let repos = Current.Monitor.create ~sw:(Api.sw api) ~read ~watch ~pp in
   { iid; account; api; repos }
 
 let api t = t.api

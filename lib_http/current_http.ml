@@ -23,27 +23,26 @@ let https_handler uri raw_flow =
   in
   Tls_eio.client_of_flow ?host (Lazy.force tls_config) raw_flow
 
-let client () =
-  let env = Current.Engine_env.get_env () in
-  let net = Eio.Stdenv.net env in
-  Cohttp_eio.Client.make ~https:(Some https_handler) net
+type t = Cohttp_eio.Client.t
+
+let create ~net = Cohttp_eio.Client.make ~https:(Some https_handler) net
 
 let read_body body =
   Eio.Buf_read.(of_flow ~max_size:max_int body |> take_all)
 
-let get ?(headers=Cohttp.Header.init ()) uri =
+let get t ?(headers=Cohttp.Header.init ()) uri =
   Eio.Switch.run @@ fun sw ->
-  let resp, body = Cohttp_eio.Client.get (client ()) ~sw ~headers uri in
+  let resp, body = Cohttp_eio.Client.get t ~sw ~headers uri in
   resp, read_body body
 
-let post ?(headers=Cohttp.Header.init ()) ?body uri =
+let post t ?(headers=Cohttp.Header.init ()) ?body uri =
   Eio.Switch.run @@ fun sw ->
   let body = Option.map Cohttp_eio.Body.of_string body in
-  let resp, body = Cohttp_eio.Client.post (client ()) ~sw ~headers ?body uri in
+  let resp, body = Cohttp_eio.Client.post t ~sw ~headers ?body uri in
   resp, read_body body
 
-let patch ?(headers=Cohttp.Header.init ()) ?body uri =
+let patch t ?(headers=Cohttp.Header.init ()) ?body uri =
   Eio.Switch.run @@ fun sw ->
   let body = Option.map Cohttp_eio.Body.of_string body in
-  let resp, body = Cohttp_eio.Client.patch (client ()) ~sw ~headers ?body uri in
+  let resp, body = Cohttp_eio.Client.patch t ~sw ~headers ?body uri in
   resp, read_body body

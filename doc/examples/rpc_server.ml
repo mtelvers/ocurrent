@@ -34,9 +34,10 @@ let pipeline ~repo () =
 
 let main env config mode capnp repo =
   Eio.Switch.run @@ fun sw ->
-  Current.Engine_env.init ~sw ~env;
-  let repo = Git.Local.v (Fpath.v repo) in
-  let engine = Current.Engine.create ~config (pipeline ~repo) in
+  let net = Eio.Stdenv.net env in
+  let process_mgr = Eio.Stdenv.process_mgr env in
+  let repo = Git.Local.v ~sw ~process_mgr (Fpath.v repo) in
+  let engine = Current.Engine.create ~sw ~env ~config (pipeline ~repo) in
   let service_id = Capnp_rpc_unix.Vat_config.derived_id capnp "engine" in
   let restore = Capnp_rpc_net.Restorer.single service_id (Rpc.engine engine) in
   let vat = Capnp_rpc_unix.serve ~sw ~restore capnp in
@@ -46,7 +47,7 @@ let main env config mode capnp repo =
   close_out ch;
   Logs.app (fun f -> f "Wrote capability reference to %S" cap_file);
   let site = Current_web.Site.(v ~has_role:allow_all) ~name:program_name (Current_web.routes engine) in
-  Current_web.run ~mode site
+  Current_web.run ~sw ~net ~mode site
 
 (* Command-line parsing *)
 
