@@ -52,6 +52,10 @@ type t = {
   allowlist : Allowlist.t;      (* Accounts which can use this app. *)
   installations : Installs.t;
   webhook_secret : string; (* Shared secret for validating webhooks from GitHub *)
+  mutable monitor_started : bool;
+  (* The installation-monitor daemon is forked on the engine's switch on
+     first use, since [make_config] runs at Cmdliner-parse time — before
+     [Engine_env.init] — and there's no switch to fork on yet. *)
 }
 
 let webhook_secret t = t.webhook_secret
@@ -169,7 +173,18 @@ let monitor_installations t () =
   in
   aux ()
 
+let ensure_monitor t =
+  if not t.monitor_started then begin
+    t.monitor_started <- true;
+    Eio.Fiber.fork_daemon ~sw:(Current.Engine_env.get_sw ()) (fun () ->
+      (try monitor_installations t ()
+       with ex -> Log.err (fun f -> f "monitor_installations failed: %a" Fmt.exn ex));
+      `Stop_daemon
+    )
+  end
+
 let installations t =
+  ensure_monitor t;
   let+ apis = Installs.get t.installations in
   apis |> Int_map.bindings |> List.map snd
 
@@ -183,13 +198,7 @@ let make_config app_id private_key_file allowlist webhook_secret_file =
     | Error (`Msg msg) -> Fmt.failwith "Failed to parse secret key!@ %s" msg
     | Ok (`RSA key) ->
       let installations = Installs.create ~name:"installations" (Error (`Active `Running)) in
-      let t = { app_id; key; allowlist; installations; webhook_secret } in
-      Eio.Fiber.fork_daemon ~sw:(Current.Engine_env.get_sw ()) (fun () ->
-        (try monitor_installations t ()
-         with ex -> Log.err (fun f -> f "monitor_installations failed: %a" Fmt.exn ex));
-        `Stop_daemon
-      );
-      t
+      { app_id; key; allowlist; installations; webhook_secret; monitor_started = false }
     | Ok _ -> Fmt.failwith "Unsupported private key type" [@@warning "-11"]
 
 open Cmdliner
