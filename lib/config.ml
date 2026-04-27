@@ -13,12 +13,13 @@ let set_confirm t level =
 let get_confirm t = t.confirm
 
 (* If the level isn't changed manually within [duration], remove limiter.
-   The Engine is responsible for calling this once it has a switch to fork on. *)
+   The Engine is responsible for calling this once it has a switch to fork on.
+   Forked as a daemon so the switch isn't held open by a long sleep. *)
 let start_slow_start ~sw ~clock t =
   match t.auto_release with
   | None -> ()
   | Some duration ->
-    Eio.Fiber.fork ~sw (fun () ->
+    Eio.Fiber.fork_daemon ~sw (fun () ->
       let result =
         Eio.Fiber.first
           (fun () ->
@@ -29,11 +30,12 @@ let start_slow_start ~sw ~clock t =
               Eio.Condition.await t.level_cond t.level_mutex);
             `Changed)
       in
-      match result with
-      | `Timeout ->
-        Log.info (fun f -> f "Slow start period over; removing limiter");
-        set_confirm t None
-      | `Changed -> ()
+      (match result with
+       | `Timeout ->
+         Log.info (fun f -> f "Slow start period over; removing limiter");
+         set_confirm t None
+       | `Changed -> ());
+      `Stop_daemon
     )
 
 let v ?auto_release ?confirm () =

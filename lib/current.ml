@@ -150,6 +150,10 @@ module Engine = struct
     if Current_incr.observe Config.now <> None then
       failwith "Engine is already running (Config.now already set)!";
     Current_incr.change Config.active_config (Some config);
+    Config.start_slow_start
+      ~sw:(Engine_env.get_sw ())
+      ~clock:(Engine_env.clock ())
+      config;
     Eio.Fiber.fork_daemon ~sw:(Engine_env.get_sw ()) (fun () ->
       Fun.protect
         ~finally:(fun () -> Current_incr.change Config.active_config None)
