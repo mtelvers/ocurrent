@@ -581,7 +581,8 @@ type t = {
   app_id : string option;
   webhook_secret : string; (* Shared secret for validating webhooks from GitHub *)
   token_lock : Eio.Mutex.t;
-  caps : Current_cache.caps;
+  sw : Eio.Switch.t;       (* For forking webhook-watch daemons. *)
+  clock : float Eio.Time.clock_ty Eio.Resource.t; (* For rate-limiting sleeps. *)
   http : Current_http.t;
   check_run_set_status_cache : Check_run_set_status_cache.t;
   commit_set_status_cache : Commit_set_status_cache.t;
@@ -595,8 +596,8 @@ and refs = {
 }
 
 let webhook_secret t = t.webhook_secret
-let sw t = t.caps.sw
-let clock t = t.caps.clock
+let sw t = t.sw
+let clock t = t.clock
 let http t = t.http
 
 let default_ref t = t.default_ref
@@ -607,7 +608,9 @@ let v ~caps ~http ~get_token ?app_id ~account ~webhook_secret () =
   let monitors = Monitors.empty in
   let token_lock = Eio.Mutex.create () in
   { get_token; token_lock; token = no_token; monitors; account; app_id; webhook_secret;
-    caps; http;
+    sw = caps.Current_cache.sw;
+    clock = caps.Current_cache.clock;
+    http;
     check_run_set_status_cache = Check_run_set_status_cache.create ~caps;
     commit_set_status_cache = Commit_set_status_cache.create ~caps }
 
@@ -729,7 +732,7 @@ module Monitor (Query : GRAPHQL_QUERY) = struct
     let watch refresh =
       let owner_name = Printf.sprintf "%s/%s" repo.owner repo.name in
       let stop = ref false in
-      Eio.Fiber.fork_daemon ~sw:t.caps.sw (fun () ->
+      Eio.Fiber.fork_daemon ~sw:t.sw (fun () ->
         let rec aux () =
           if !stop then `Stop_daemon
           else begin
@@ -737,7 +740,7 @@ module Monitor (Query : GRAPHQL_QUERY) = struct
                await_event ~owner_name;
                Log.info (fun f -> f "Received webhook for owner/name: %s" owner_name);
                refresh ();
-               Eio.Time.sleep t.caps.clock 10.0   (* Limit updates to 1 per 10 seconds *)
+               Eio.Time.sleep t.clock 10.0   (* Limit updates to 1 per 10 seconds *)
              with ex ->
                Log.err (fun f -> f "%s thread failed: %a" Query.name Fmt.exn ex));
             aux ()
@@ -752,7 +755,7 @@ module Monitor (Query : GRAPHQL_QUERY) = struct
         Eio.Condition.broadcast cond
     in
     let pp f = Fmt.pf f "Watch %a %s" Repo_id.pp repo Query.name in
-    Current.Monitor.create ~sw:t.caps.sw ~read ~watch ~pp
+    Current.Monitor.create ~sw:t.sw ~read ~watch ~pp
 
   let get t repo =
     let monitor =

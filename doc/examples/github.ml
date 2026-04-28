@@ -75,7 +75,7 @@ let main config mode github_config repo =
     Current_web.routes engine
   in
   let site = Current_web.Site.(v ~has_role) ~name:program_name routes in
-  Current_web.run ~sw ~net ~mode site
+  Current_web.run ~net ~mode site
 
 (* Command-line parsing *)
 

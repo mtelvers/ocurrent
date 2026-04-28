@@ -52,7 +52,7 @@ let main env config mode capnp repo =
   close_out ch;
   Logs.app (fun f -> f "Wrote capability reference to %S" cap_file);
   let site = Current_web.Site.(v ~has_role:allow_all) ~name:program_name (Current_web.routes engine) in
-  Current_web.run ~sw ~net ~mode site
+  Current_web.run ~net ~mode site
 
 (* Command-line parsing *)
 

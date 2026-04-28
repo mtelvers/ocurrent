@@ -360,7 +360,8 @@ type t = {
   get_token : unit -> token;
   webhook_secret : string;  (* Shared secret for validating webhooks from GitLab *)
   token_lock : Eio.Mutex.t;
-  caps : Current_cache.caps;
+  sw : Eio.Switch.t;       (* For forking webhook-watch daemons. *)
+  clock : float Eio.Time.clock_ty Eio.Resource.t; (* For rate-limiting sleeps. *)
   http : Current_http.t;
   commit_set_status_cache : Commit_set_status_cache.t;
   mutable token : token;
@@ -374,8 +375,8 @@ and refs = {
 }
 
 let webhook_secret t = t.webhook_secret
-let sw t = t.caps.sw
-let clock t = t.caps.clock
+let sw t = t.sw
+let clock t = t.clock
 let http t = t.http
 
 let default_ref t = t.default_ref
@@ -387,7 +388,9 @@ let v ~caps ~http ~get_token ~webhook_secret () =
   let refs_monitors = Repo_map.empty in
   let token_lock = Eio.Mutex.create () in
   { get_token; token_lock; token = no_token; head_monitors; refs_monitors; webhook_secret;
-    caps; http;
+    sw = caps.Current_cache.sw;
+    clock = caps.Current_cache.clock;
+    http;
     commit_set_status_cache = Commit_set_status_cache.create ~caps }
 
 let of_oauth ~caps ~http ~token ~webhook_secret =
@@ -441,14 +444,14 @@ let make_head_commit_monitor t repo =
   let watch refresh =
     let owner_name = Fmt.str "%a" Repo_id.to_git repo in
     let stop = ref false in
-    Eio.Fiber.fork_daemon ~sw:t.caps.sw (fun () ->
+    Eio.Fiber.fork_daemon ~sw:t.sw (fun () ->
       let rec aux () =
         if !stop then `Stop_daemon
         else begin
           (try
              await_event ~owner_name;
              refresh ();
-             Eio.Time.sleep t.caps.clock 10.0   (* Limit updates to 1 per 10 seconds *)
+             Eio.Time.sleep t.clock 10.0   (* Limit updates to 1 per 10 seconds *)
            with ex ->
              Log.err (fun f -> f "head_commit thread failed: %a" Fmt.exn ex));
           aux ()
@@ -462,7 +465,7 @@ let make_head_commit_monitor t repo =
       Eio.Condition.broadcast cond
   in
   let pp f = Fmt.pf f "Watch %a default ref head" Repo_id.pp repo in
-  Current.Monitor.create ~sw:t.caps.sw ~read ~watch ~pp
+  Current.Monitor.create ~sw:t.sw ~read ~watch ~pp
 
 let head_commit t repo =
   Current.component "%a head" Repo_id.pp repo |>
@@ -581,14 +584,14 @@ let make_refs_monitor t repo =
   let watch refresh =
     let owner_name = Fmt.str "%a" Repo_id.to_git repo in
     let stop = ref false in
-    Eio.Fiber.fork_daemon ~sw:t.caps.sw (fun () ->
+    Eio.Fiber.fork_daemon ~sw:t.sw (fun () ->
       let rec aux () =
         if !stop then `Stop_daemon
         else begin
           (try
              await_event ~owner_name;
              refresh ();
-             Eio.Time.sleep t.caps.clock 10.0   (* Limit updates to 1 per 10 seconds *)
+             Eio.Time.sleep t.clock 10.0   (* Limit updates to 1 per 10 seconds *)
            with ex ->
              Log.err (fun f -> f "refs thread failed: %a" Fmt.exn ex));
           aux ()
@@ -602,7 +605,7 @@ let make_refs_monitor t repo =
       Eio.Condition.broadcast cond
   in
   let pp f = Fmt.pf f "Watch %a CI refs" Repo_id.pp repo in
-  Current.Monitor.create ~sw:t.caps.sw ~read ~watch ~pp
+  Current.Monitor.create ~sw:t.sw ~read ~watch ~pp
 
 let refs t repo =
   Current.Monitor.get (

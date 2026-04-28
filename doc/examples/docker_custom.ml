@@ -96,7 +96,7 @@ let main config mode =
       pipeline ~docker ~test_cache ())
   in
   let site = Current_web.Site.(v ~has_role:allow_all) ~name:program_name (Current_web.routes engine) in
-  Current_web.run ~sw ~net ~mode site
+  Current_web.run ~net ~mode site
 
 (* Command-line parsing *)
 
