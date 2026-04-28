@@ -98,38 +98,104 @@ patterns. Most of your edits will be one of these.
 The pre-2.0 entry point was `Lwt_main.run` running `Lwt.choose
 [Current.Engine.thread; Current_web.run; …]`. The engine is no longer
 a thread you manage explicitly: `Engine.create` forks a daemon onto
-the ambient switch, so your main only needs to keep that switch open.
+the switch you give it, so your main only needs to keep that switch
+open.
 
 The minimal 2.0 ladder is:
 
 ```ocaml
-let main () config mode app … =
+let main () config mode prometheus_config =
   Eio_main.run @@ fun env ->
   Eio.Switch.run @@ fun sw ->
-  Current.Engine_env.init ~sw ~env;
   let net = Eio.Stdenv.net env in
   …
-  let engine = Current.Engine.create ~config (fun () -> pipeline …) in
-  …
+  let engine =
+    Current.Engine.create ~sw ~env ~config (fun engine ->
+      let caps = Current_cache.caps_of_engine engine in
+      (* Build plugin instances here from [caps]. *)
+      pipeline …)
+  in
   let site = Current_web.Site.v ~has_role ~name:"…" routes in
   Prometheus_unix.serve ~sw ~net prometheus_config;
-  Current_web.run ~mode site
+  Current_web.run ~net ~mode site
 ```
 
 The order matters:
 
 - `Eio_main.run` is at the top.
 - `Eio.Switch.run` opens the switch the engine and web server live on.
-- `Current.Engine_env.init ~sw ~env` is **mandatory** before any
-  `Current.Engine.create` call — lower-level modules (`Job`,
-  `Process`, the cache) reach into `Engine_env` for the env and switch
-  rather than threading them through every signature.
+- `Current.Engine.create ~sw ~env` takes the switch and Eio env
+  explicitly. The factory thunk receives the new `Engine.t` so plugin
+  instances built inside can call `Current_cache.caps_of_engine` to
+  derive a `caps` record (used to instantiate caches — see *Plugin
+  instance creation* below).
 - `Prometheus_unix.serve` returns immediately after forking the metrics
   server onto `sw`. It's no longer a list of Lwt threads to compose
   into `Lwt.choose`.
-- `Current_web.run` is the blocking call. It returns when the web
+- `Current_web.run ~net` is the blocking call. It returns when the web
   server stops, and exiting `Switch.run` then tears down the engine
-  daemon and any Prometheus server.
+  daemon and any Prometheus server. Note: it now takes `~net`
+  explicitly (was implicit via global state in pre-2.0 betas).
+
+> **Note for early-2.0-beta users**: an earlier design had a global
+> `Current.Engine_env.init ~sw ~env` call that stashed capabilities for
+> lower modules to retrieve. That module has been removed — `~sw` and
+> `~env` go directly to `Engine.create`, and per-engine state lives on
+> `Engine.t`. If you ported during the beta, delete the
+> `Engine_env.init` line and add `~sw ~env` to your `Engine.create`
+> call.
+
+### Plugin instance creation
+
+Pre-2.0 plugins were typically used as global modules:
+
+```ocaml
+module Docker = Current_docker.Default
+module Github = Current_github
+…
+Docker.build src ~pull:false dockerfile
+```
+
+In 2.0, plugins that own caches need a per-engine instance. The
+construction happens inside the engine factory, where `engine` is in
+scope. Pattern:
+
+```ocaml
+Current.Engine.create ~sw ~env ~config (fun engine ->
+  let caps = Current_cache.caps_of_engine engine in
+  let git = Current_git.create ~caps in
+  let module Docker = (val Current_docker.default ~caps ~git) in
+  let github = Current_github.Api.create ~caps ~net github_config in
+  …
+  pipeline ~git ~docker:(module Docker) ~github ())
+```
+
+The shapes per plugin:
+
+- **`Current_git.create ~caps`** returns a `Current_git.t` (record of
+  cache instances). Pass it to `Current_git.fetch`, etc.
+- **`Current_slack.create ~caps ~net`** returns a `Current_slack.t`.
+- **`Current_github.Api.create ~caps ~net config`** and
+  **`Current_github.App.create ~caps ~net config`**.
+- **`Current_gitlab.Api.create ~caps ~net config`**.
+- **`Current_ssh.create ~caps`**.
+- **`Current_docker.make ~caps ~git ~docker_context`** returns a
+  first-class module of type `(module Current_docker.S.DOCKER)`.
+  Unpack with `let module Docker = (val …) in`. There's also
+  `Current_docker.default ~caps ~git`, which reads `$DOCKER_CONTEXT`
+  from the environment.
+- **`Current_ocluster.make ~caps ~connection`** returns a first-class
+  module of type `(module Current_ocluster.S)`.
+
+If you need a plugin in a function defined outside the factory,
+either:
+
+1. Take it as an argument (record or first-class module), threaded
+   from the factory; or
+2. Construct everything inline inside the factory thunk.
+
+Don't try to construct plugin instances above the `Engine.create`
+call — `caps` doesn't exist yet.
 
 ### Capnp-rpc 2.x: `client_only_vat` and `serve`
 
@@ -242,8 +308,8 @@ fibers or spawn subprocesses scoped to the job.
 
 ### `Current.Engine.thread` is gone
 
-The engine runs as an Eio daemon on the switch passed via
-`Engine_env.init`. There is no thread to compose with `Lwt.choose`.
+The engine runs as an Eio daemon on the switch passed to
+`Engine.create ~sw`. There is no thread to compose with `Lwt.choose`.
 Whatever you used to combine engine + web + prometheus becomes a flat
 sequence inside the same `Switch.run`:
 
@@ -257,7 +323,7 @@ Lwt.choose [
 
 (* after *)
 Prometheus_unix.serve ~sw ~net config;
-Current_web.run ~mode site
+Current_web.run ~net ~mode site
 ```
 
 ### `Lwt.finalize` → `Fun.protect`
@@ -309,9 +375,10 @@ end
 Logging.run @@ fun () ->
 Eio_main.run @@ fun env ->
 Eio.Switch.run @@ fun sw ->
-Current.Engine_env.init ~sw ~env;
+let net = Eio.Stdenv.net env in
+let engine = Current.Engine.create ~sw ~env ~config (fun engine -> …) in
 …
-Current_web.run ~mode site
+Current_web.run ~net ~mode site
 ```
 
 ### `dune` files
@@ -371,10 +438,11 @@ opam pin add -yn ocluster-api-eio.dev https://github.com/ocurrent/ocluster.git#e
 opam pin add -yn current_ocluster.dev https://github.com/ocurrent/ocluster.git#eio
 ```
 
-Two changes to your code:
+Three changes to your code:
 
-1. **`Connection.create` now takes `~sw`.** The connection forks a
-   reconnection daemon on this switch:
+1. **`Connection.create` now takes `~sw ~clock`.** The connection
+   forks a reconnection daemon on this switch and uses the clock for
+   backoff sleeps:
 
    ```ocaml
    (* before *)
@@ -383,11 +451,29 @@ Two changes to your code:
 
    (* after *)
    let sched = Current_ocluster.Connection.create
-       ~sw                                              (* new *)
+       ~sw ~clock                                       (* new *)
        (Capnp_rpc_unix.Vat.import_exn vat sched) in
    ```
 
-2. **`Cluster_api.*` references in your own code.** The library is
+2. **The plugin is a first-class module, not a global value.** Build
+   one inside the engine factory:
+
+   ```ocaml
+   Current.Engine.create ~sw ~env ~config (fun engine ->
+     let caps = Current_cache.caps_of_engine engine in
+     let module Cluster = (val Current_ocluster.make ~caps ~connection:sched) in
+     let cluster_t = Cluster.v ?push_auth () in
+     …
+     Cluster.build cluster_t ~pool ~src ~options dockerfile)
+   ```
+
+   The inner `Cluster.t` carries the per-call defaults
+   (timeout/push_auth/secrets/urgent/cache_hint/level), tweaked via
+   `Cluster.with_timeout`/`with_push_auth`/`with_secrets`/`with_urgent`.
+   The build cache is held inside the module instance; calling
+   `make` again yields a fresh cache.
+
+3. **`Cluster_api.*` references in your own code.** The library is
    now `cluster_api_eio`; module name is `Cluster_api_eio`. For each
    file that uses `Cluster_api.Docker.Spec`, etc., add a module alias
    at the top:
@@ -426,9 +512,12 @@ Update your `current.dev` pin (`opam update`, then
 
 Something is calling into Eio with a switch that's already exited.
 The most common cause is forking a fiber that outlives a `Switch.run`
-scope. If you're forking on the engine's switch via
-`Engine_env.get_sw ()`, make sure your `Engine_env.init` was called
-inside a `Switch.run` whose body is the engine's whole lifetime.
+scope. The engine's switch is the one passed to
+`Current.Engine.create ~sw`; anything you fork onto it must live no
+longer than the surrounding `Switch.run`. Building plugin instances
+above `Engine.create` (where `caps.sw` would be referencing a switch
+that's already on its way out) is a typical cause — construct them
+inside the factory thunk instead.
 
 ### `Cmdliner.Term.env` shadowed our env
 

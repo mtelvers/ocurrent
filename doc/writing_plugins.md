@@ -1,6 +1,6 @@
 ### Writing plugins
 
-To create your own primitive operations (such as `Docker.build`), you'll probably want to use the 
+To create your own primitive operations (such as `Docker.build`), you'll probably want to use the
 [Current_cache](https://ocurrent.github.io/ocurrent/current/Current_cache/index.html) library.
 This handles all the details of starting builds, recording the results, managing log files, etc.
 
@@ -32,12 +32,54 @@ A minimal example looks something like this:
 ...
 # module FC = Current_cache.Make(Frob);;
 ...
-# let frob key =
+```
+
+`Current_cache.Make(Frob)` produces a module with a per-engine cache type. Each
+engine instantiates a cache once at startup and reuses it for every call:
+
+```ocaml
+let frob fc key =
   Current.component "Frob" |>
   let> key = key in
-  FC.get Frob.No_context key;;
-...
+  FC.get fc Frob.No_context key
 ```
+
+The plugin user supplies `fc` from their engine factory. The shape (with
+your own `Eio_main.run` and `Eio.Switch.run` outside) is roughly:
+
+```text
+Current.Engine.create ~sw ~env ~config (fun engine ->
+  let caps = Current_cache.caps_of_engine engine in
+  let fc = FC.create ~caps in
+  pipeline ~fc ())
+```
+
+`Current_cache.caps_of_engine engine` produces a `Current_cache.caps` record
+containing the engine's switch and Eio capabilities. Pass that to each
+`Make`/`Output`/`Generic` cache's `create ~caps`.
+
+If your plugin wraps several Op modules and you'd rather expose a single
+"plugin instance" rather than a record of caches, follow the docker pattern
+— a `make` function that returns a first-class module, with the caches as
+let-bindings inside:
+
+```text
+let make ~caps =
+  (module struct
+    module FC = Current_cache.Make(Frob)
+    let frob_cache = FC.create ~caps
+    let frob key =
+      Current.component "Frob" |>
+      let> key = key in
+      FC.get frob_cache Frob.No_context key
+  end : sig
+    val frob : Frob.Key.t Current.t -> Frob.Value.t Current.t
+  end)
+```
+
+Callers unpack with `let module Plugin = (val make ~caps) in …`.
+
+---
 
 The `frob` function is the one exposed to users.
 These functions always start by getting the actual values
@@ -77,4 +119,3 @@ As well as caching build operations (which take a key and produce a value), you 
 (which take a key and a value as input). For example, the `Docker.tag` operation above uses the output cache.
 
 See the [Current_cache](https://ocurrent.github.io/ocurrent/current/Current_cache/index.html) API for more information.
-

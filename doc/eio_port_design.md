@@ -327,3 +327,142 @@ An Eio fork executes upstream's stated direction. Best shape:
   is idiomatic but `Cmd.docker [...]` helpers in plugins return lists
   today, so no change needed. Flag if the trial finds plugins constructing
   commands differently.
+
+---
+
+## Implementation notes (2026)
+
+This section records where the final implementation diverged from the
+design above. Read the rest of the doc first for context; this is the
+delta.
+
+### Engine_env removed; `~sw ~env` go to `Engine.create` directly
+
+The original sketch had a process-wide `Current.Engine_env` module that
+stashed `~sw ~env` for `Job`, `Process`, and the cache to read back.
+That was a global. The final shape passes them to `Engine.create`
+explicitly:
+
+```ocaml
+val create :
+  sw:Eio.Switch.t ->
+  env:_ env ->
+  ?clock:_ ->
+  ?config:Config.t ->
+  ?trace:_ ->
+  (t -> unit term) ->
+  t
+```
+
+Per-engine state lives on `Engine.t`. The factory thunk receives the
+engine so plugins built inside can derive a `Current_cache.caps`
+record from it. There's no longer any global init step.
+
+### Per-instance cache (no `Current_cache.Runtime` stash)
+
+The cache used to keep `caps` in a global ref initialised by an engine
+hook. This too was removed. `Current_cache.Make(B)`, `.Output(P)`, and
+`.Generic(Op)` now each expose:
+
+```ocaml
+type t
+val create : caps:caps -> t
+val get/set : t -> ?schedule:_ -> Op.t -> Op.Key.t -> _ Current.Primitive.t
+```
+
+`Current_cache.caps_of_engine engine` produces the `caps` record.
+Plugins call this once inside the engine factory and pass it to each
+of their cache modules' `create`.
+
+### Plugins use `make`/`default` returning a first-class module
+
+Several iterations on the plugin shape:
+
+1. `create ~engine` returning a record (worked but coupled plugins to
+   the engine type).
+2. `create ~caps ~net …` returning a record (decoupled, used by
+   slack/git/github/gitlab/ssh).
+3. `Make () (E)` generative functor (used briefly for docker and
+   ocluster, ergonomically heavier).
+4. **Current shape** for plugins that want module-level cache scope
+   (docker, ocluster): a plain function returning a first-class
+   module:
+
+   ```ocaml
+   val Current_docker.make :
+     caps:Current_cache.caps ->
+     git:Current_git.t ->
+     docker_context:string option ->
+     (module Current_docker.S.DOCKER with type Image.t = Image.t)
+
+   val Current_ocluster.make :
+     caps:Current_cache.caps ->
+     connection:Connection.t ->
+     (module Current_ocluster.S)
+   ```
+
+   Callers unpack with `let module Docker = (val …) in`. Each call
+   returns a fresh module identity (and thus fresh caches), the same
+   semantics that a generative functor gives but with less ceremony.
+
+Plugins without a cycle between their `Op.t` and outer `t`
+(slack/git/github/gitlab/ssh) keep the simpler `create ~caps`
+returning a record.
+
+### `current_ocluster` — hybrid `t` + `make`
+
+`current_ocluster` had the cycle problem: the build operation's `Op.t`
+was the same record as the plugin's outer `t`, which itself contained
+`Build.t`. Resolved by:
+
+- `Make () (E : { caps; connection })` (later `make ~caps ~connection`)
+  builds the cache at module scope — outside `t`.
+- The inner `t` shrinks to per-call defaults (timeout/push_auth/
+  secrets/urgent/cache_hint/level) with `with_*` helpers, plus `v ()`.
+- `Op.t = t` no longer cycles through `Build.t`, because `Build.t`
+  isn't in `t` any more — it's the module-scope `build_cache`.
+
+### Connection-style shared state takes its own `~sw ~clock`
+
+`Current_ocluster.Connection.create ~sw ~clock` takes both: `~sw`
+scopes the reconnection daemon, `~clock` is needed for backoff sleeps.
+Anonymous GitHub access (`Current_github.Api.Anonymous.create ~sw ~net
+~clock`) follows the same pattern — it doesn't go through the cache
+machinery, so it doesn't need a `caps`, just the raw capabilities.
+
+### Job log file uses `Unix.openfile`/`Unix.write_substring`
+
+Plain Unix file APIs, not `Eio.Path.open_out`. Reason: `Eio.Path`'s
+open yields on the linux/io_uring backend, and the yield in
+`Job.create`/`Job.start` raced with `current_cache.ml`'s `t.job_id`
+assignment. Synchronous Unix I/O sidesteps the issue; writes are short
+lines that hit the page cache in microseconds, not a meaningful
+scheduler stall in practice.
+
+`with_tmpdir` does use `Eio.Path` (`mkdir`/`rmtree`) — it now takes
+`~job` so it can pull `fs` from the job's stashed capabilities. SQLite
+stays synchronous.
+
+### Engine.update via signal counter, not a one-shot promise
+
+The original mutex+option+ref dance for `next_evaluation`/`update` was
+replaced with a monotonic counter. Each iteration snapshots the
+counter as a baseline; a bridge fiber resolves the trace's `~next`
+promise once the counter advances past the baseline. That gives
+coalescing for free (the engine doesn't care how many updates landed
+between iterations) and naturally drops updates issued before the
+engine's first iteration (e.g. `SVar.set` during pipeline init).
+
+### Switch_ext lifts the spawn-managed-switch pattern
+
+`Monitor` (one switch per activation) and `Current_cache` instance
+slots both fork a daemon that runs `Switch.run sw → resolve sw_p →
+await release_p`. That's `Current.Switch_ext.spawn_managed
+~parent_sw`, returning `(Switch.t, unit Promise.u)`.
+
+### Pool.of_fn forwards `~register_cancel`
+
+The user-supplied `get` function for `Pool.of_fn` now receives
+`~register_cancel`. Implementations that handle cancellation through
+`Switch.on_release sw` (like ocluster's `Connection.submit`) can
+ignore it. The previous behaviour silently dropped the registration.
