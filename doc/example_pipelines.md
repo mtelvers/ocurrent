@@ -4,10 +4,10 @@
 
 ```ocaml file=examples/docker_build_local.ml,part=pipeline
 (* Run "docker build" on the latest commit in Git repository [repo]. *)
-let pipeline ~repo () =
+let pipeline ~docker ~repo () =
   let src = Git.Local.head_commit repo in
-  let image = Docker.build ~pull ~timeout (`Git src) in
-  Docker.run image ~args:["dune"; "exec"; "--"; "docker_build_local"; "--help"]
+  let image = Docker.build docker ~pull ~timeout (`Git src) in
+  Docker.run docker image ~args:["dune"; "exec"; "--"; "docker_build_local"; "--help"]
 ```
 
 This monitors a local Git repository (`repo`), from which it gets the current head commit.
@@ -71,16 +71,16 @@ have logs; `head commit` doesn't, for example).
 let weekly = Current_cache.Schedule.v ~valid_for:(Duration.of_day 7) ()
 
 (* Run "docker build" on the latest commit in Git repository [repo]. *)
-let pipeline ~repo () =
+let pipeline ~docker ~repo () =
   let src = Git.Local.head_commit repo in
   let build ocaml_version =
-    let base = Docker.pull ~schedule:weekly ("ocaml/opam:debian-ocaml-" ^ ocaml_version) in
+    let base = Docker.pull docker ~schedule:weekly ("ocaml/opam:debian-ocaml-" ^ ocaml_version) in
     let dockerfile =
       let+ base = base in
       `Contents (dockerfile ~base ~ocaml_version)
     in
-    Docker.build ~label:ocaml_version ~pull:false ~dockerfile (`Git src) |>
-    Docker.tag ~tag:(Fmt.str "example-%s" ocaml_version)
+    Docker.build docker ~label:ocaml_version ~pull:false ~dockerfile (`Git src) |>
+    Docker.tag docker ~tag:(Fmt.str "example-%s" ocaml_version)
   in
   Current.all [
     build "4.10";

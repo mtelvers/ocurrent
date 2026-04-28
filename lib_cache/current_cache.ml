@@ -262,7 +262,7 @@ module Generic(Op : S.GENERIC) = struct
                t.op <- `Active (op, latched);
                let pp_op f = pp_op f (t.key, op.value) in
                Job.log job "New job: %t" pp_op;
-               Eio.Fiber.fork ~sw:t.slot_sw (fun () ->
+               Eio.Fiber.fork ~sw:job_sw (fun () ->
                  let _ = Eio.Promise.await (Job.start_time job) in
                  Eio.Fiber.yield ();        (* Ensure we're outside any propagate *)
                  notify t

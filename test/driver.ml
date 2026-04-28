@@ -113,7 +113,13 @@ let test env ?config ?clock ?final_stats ~name v_fn actions =
         wait (i - 1)
       )
     in
-    wait 3
+    (* Worst case is the post-confirmation chain in the v2 test:
+        1. publish-fork's confirm-await wakes, runs through to publish-body's yield;
+        2. notify-on-start (on job_sw) wakes after start_time resolves, hits its own yield;
+        3. publish-fork resumes, Switch.run job_sw waits for the child notify-on-start;
+        4. notify-on-start runs [notify t] → [Engine.update ()] resolves [next].
+       Four scheduler ticks. *)
+    wait 4
   in
   try
     Eio.Switch.run (fun sw ->
