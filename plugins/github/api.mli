@@ -86,11 +86,10 @@ val cmdliner : config Cmdliner.Term.t
 val cmdliner_opt : config option Cmdliner.Term.t
 
 val create :
-  engine:Current.Engine.t ->
+  caps:Current_cache.caps ->
   net:[`Generic | `Unix] Eio.Net.ty Eio.Resource.t ->
   config -> t
-(** [create ~engine ~net config] activates an OAuth-based [config] inside
-    the engine's Eio scope. *)
+(** [create ~caps ~net config] activates an OAuth-based [config]. *)
 val webhook_secret_file : string Cmdliner.Term.t
 
 module Repo : sig

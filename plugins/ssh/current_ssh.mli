@@ -1,8 +1,7 @@
 type t
 
-val create : engine:Current.Engine.t -> t
-(** [create ~engine] builds a runtime inside the engine's Eio scope, with
-    a per-engine result cache. *)
+val create : caps:Current_cache.caps -> t
+(** [create ~caps] builds a runtime with a result cache scoped to [caps]. *)
 
 val run : t -> schedule:Current_cache.Schedule.t -> key:string -> string -> string list Current.t -> unit Current.t
 (** [run t ~schedule ~key host args] records that [key] is now set to [args], and

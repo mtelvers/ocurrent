@@ -43,9 +43,8 @@ end
 
 type t
 
-val create : engine:Current.Engine.t -> t
-(** [create ~engine] builds a Git plugin runtime: per-engine fetch/clone
-    caches keyed off the engine's capabilities. *)
+val create : caps:Current_cache.caps -> t
+(** [create ~caps] builds a Git plugin runtime: fetch/clone caches scoped to [caps]. *)
 
 val clone : t -> schedule:Current_cache.Schedule.t -> ?gref:string -> string -> Commit.t Current.t
 (** [clone t ~schedule ~gref uri] evaluates to the head commit of [uri]'s [gref] branch (default: "master"). *)

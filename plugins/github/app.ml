@@ -188,8 +188,7 @@ let installations t =
 
 (* Construction *)
 
-let create ~engine ~net config =
-  let caps = Current_cache.caps_of_engine engine in
+let create ~caps ~net config =
   let installations = Installs.create ~name:"installations" (Error (`Active `Running)) in
   let http = Current_http.create ~net in
   let t = { config; installations; caps; http } in

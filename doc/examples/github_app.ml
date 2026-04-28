@@ -63,12 +63,13 @@ let main config mode app_config =
   let app_p, app_r = Eio.Promise.create () in
   let engine =
     Current.Engine.create ~sw ~env ~config (fun engine ->
-      let git = Current_git.create ~engine in
+      let caps = Current_cache.caps_of_engine engine in
+      let git = Current_git.create ~caps in
       let module Docker = Current_docker.Default () (struct
-        let caps = Current_cache.caps_of_engine engine
+        let caps = caps
         let git = git
       end) in
-      let app = Current_github.App.create ~engine ~net app_config in
+      let app = Current_github.App.create ~caps ~net app_config in
       Eio.Promise.resolve app_r app;
       let dockerfile =
         let+ base = Docker.pull ~schedule:weekly "ocaml/opam:alpine-3.13-ocaml-4.13" in

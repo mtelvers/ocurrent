@@ -23,7 +23,7 @@ let main config mode host args =
   let net = Eio.Stdenv.net env in
   let engine =
     Current.Engine.create ~sw ~env ~config (fun engine ->
-      let ssh = Current_ssh.create ~engine in
+      let ssh = Current_ssh.create ~caps:(Current_cache.caps_of_engine engine) in
       pipeline ~ssh ~host ~args ())
   in
   let site = Current_web.Site.(v ~has_role:allow_all) ~name:program_name (Current_web.routes engine) in

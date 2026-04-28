@@ -58,7 +58,7 @@ type config
 val cmdliner : config Cmdliner.Term.t
 
 val create :
-  engine:Current.Engine.t ->
+  caps:Current_cache.caps ->
   net:[`Generic | `Unix] Eio.Net.ty Eio.Resource.t ->
   config -> t
 

@@ -10,13 +10,11 @@ type t
 (** A live app constructed inside the engine's Eio scope from a [config]. *)
 
 val create :
-  engine:Current.Engine.t ->
+  caps:Current_cache.caps ->
   net:[`Generic | `Unix] Eio.Net.ty Eio.Resource.t ->
   config -> t
-(** [create ~sw ~net ~clock config] activates [config], constructing an
-    HTTPS client and forking the install-monitor daemon on [~sw]. Call this
-    from inside [Eio_main.run]/[Eio.Switch.run], before
-    {!Current.Engine.create}. *)
+(** [create ~caps ~net config] activates [config], constructing an HTTPS
+    client and forking the install-monitor daemon on [caps.sw]. *)
 
 val webhook_secret : t -> string
 val cmdliner : config Cmdliner.Term.t

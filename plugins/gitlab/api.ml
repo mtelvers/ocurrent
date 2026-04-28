@@ -770,8 +770,7 @@ let make_config token_file webhook_secret_file =
   { token = String.trim (read_file token_file);
     webhook_secret = String.trim (read_file webhook_secret_file) }
 
-let create ~engine ~net { token; webhook_secret } =
-  let caps = Current_cache.caps_of_engine engine in
+let create ~caps ~net { token; webhook_secret } =
   let http = Current_http.create ~net in
   of_oauth ~caps ~http ~token ~webhook_secret
 

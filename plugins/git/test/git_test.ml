@@ -169,8 +169,9 @@ let test () =
       (Fpath.add_seg dir "main")
   in
   let pipeline engine =
-    let git = Current_git.create ~engine in
-    let sf = SF.create ~caps:(Current_cache.caps_of_engine engine) in
+    let caps = Current_cache.caps_of_engine engine in
+    let git = Current_git.create ~caps in
+    let sf = SF.create ~caps in
     fun () ->
     let remote_commit = Current_git.Local.head_commit repo in
     let id = Current.map Current_git.Commit.id remote_commit in

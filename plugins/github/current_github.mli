@@ -280,11 +280,10 @@ module Api : sig
   (** Like [cmdliner], but the argument is optional. *)
 
   val create :
-    engine:Current.Engine.t ->
+    caps:Current_cache.caps ->
     net:[`Generic | `Unix] Eio.Net.ty Eio.Resource.t ->
     config -> t
-  (** [create ~engine ~net config] activates [config] inside the engine's
-      Eio scope. *)
+  (** [create ~caps ~net config] activates [config]. *)
 end
 
 (** Installation of a GitHub application. *)
@@ -319,12 +318,11 @@ module App : sig
   (** A live GitHub application activated inside the engine's Eio scope. *)
 
   val create :
-    engine:Current.Engine.t ->
+    caps:Current_cache.caps ->
     net:[`Generic | `Unix] Eio.Net.ty Eio.Resource.t ->
     config -> t
-  (** [create ~engine ~net config] activates [config] inside the engine's
-      Eio scope. The install-monitor daemon is forked on the engine's
-      switch. *)
+  (** [create ~caps ~net config] activates [config]. The install-monitor
+      daemon is forked on [caps.sw]. *)
 
   val webhook_secret : t -> string
   (** Webhook secret to validate payloads from GitHub. *)

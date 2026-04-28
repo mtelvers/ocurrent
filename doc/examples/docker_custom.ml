@@ -64,14 +64,15 @@ let main config mode =
   let net = Eio.Stdenv.net env in
   let engine =
     Current.Engine.create ~sw ~env ~config (fun engine ->
-      let git = Current_git.create ~engine in
+      let caps = Current_cache.caps_of_engine engine in
+      let git = Current_git.create ~caps in
       let module Docker = Current_docker.Default () (struct
-        let caps = Current_cache.caps_of_engine engine
+        let caps = caps
         let git = git
       end) in
       let module Test = Make_test (Docker) in
       let module Test_cache = Current_cache.Make (Test) in
-      let test_cache = Test_cache.create ~caps:(Current_cache.caps_of_engine engine) in
+      let test_cache = Test_cache.create ~caps in
       (* Test a Docker image by running it and then execing curl inside it. *)
       let test image =
         Current.component "test with@,@[<h>%a@]" Fmt.(list ~sep:sp string) test_command |>

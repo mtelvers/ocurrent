@@ -84,8 +84,7 @@ type t = {
   clone_cache : Clone_cache.t;
 }
 
-let create ~engine =
-  let caps = Current_cache.caps_of_engine engine in
+let create ~caps =
   { fetch_cache = Fetch_cache.create ~caps;
     clone_cache = Clone_cache.create ~caps }
 

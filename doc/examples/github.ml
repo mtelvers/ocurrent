@@ -48,12 +48,13 @@ let main config mode github_config repo =
   let github_p, github_r = Eio.Promise.create () in
   let engine =
     Current.Engine.create ~sw ~env ~config (fun engine ->
-      let git = Current_git.create ~engine in
+      let caps = Current_cache.caps_of_engine engine in
+      let git = Current_git.create ~caps in
       let module Docker = Current_docker.Default () (struct
-        let caps = Current_cache.caps_of_engine engine
+        let caps = caps
         let git = git
       end) in
-      let github = Github.Api.create ~engine ~net github_config in
+      let github = Github.Api.create ~caps ~net github_config in
       Eio.Promise.resolve github_r github;
       let head = Github.Api.head_commit github repo in
       let src = Git.fetch git (Current.map Github.Api.Commit.id head) in

@@ -186,11 +186,10 @@ module Api : sig
   (** Command-line options to generate a GitLab configuration. *)
 
   val create :
-    engine:Current.Engine.t ->
+    caps:Current_cache.caps ->
     net:[`Generic | `Unix] Eio.Net.ty Eio.Resource.t ->
     config -> t
-  (** [create ~engine ~net config] activates [config] inside the engine's
-      Eio scope. *)
+  (** [create ~caps ~net config] activates [config]. *)
 end
 
 

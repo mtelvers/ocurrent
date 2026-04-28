@@ -1,12 +1,11 @@
 type t
-(** A live Slack runtime: shared HTTPS client and per-engine result cache. *)
+(** A live Slack runtime: shared HTTPS client and a result cache scoped to [caps]. *)
 
 val create :
-  engine:Current.Engine.t ->
+  caps:Current_cache.caps ->
   net:[`Generic | `Unix] Eio.Net.ty Eio.Resource.t ->
   t
-(** [create ~engine ~net] builds a fresh runtime inside the engine's Eio
-    scope. *)
+(** [create ~caps ~net] builds a fresh Slack runtime. *)
 
 type channel
 

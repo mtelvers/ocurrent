@@ -7,8 +7,7 @@ type t = {
   cache : PC.t;
 }
 
-let create ~engine ~net =
-  let caps = Current_cache.caps_of_engine engine in
+let create ~caps ~net =
   { http = Current_http.create ~net; cache = PC.create ~caps }
 
 type channel = Post.t

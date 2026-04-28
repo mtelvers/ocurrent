@@ -60,9 +60,10 @@ let main config mode repo =
   let repo = Git.Local.v ~sw ~process_mgr (Fpath.v repo) in
   let engine =
     Current.Engine.create ~sw ~env ~config (fun engine ->
-      let git = Current_git.create ~engine in
+      let caps = Current_cache.caps_of_engine engine in
+      let git = Current_git.create ~caps in
       let module Docker = Current_docker.Default () (struct
-        let caps = Current_cache.caps_of_engine engine
+        let caps = caps
         let git = git
       end) in
       pipeline (module Docker) ~repo ())
