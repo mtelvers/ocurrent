@@ -18,7 +18,6 @@ open Current.Syntax
 
 module Git = Current_git
 module Github = Current_github
-module Docker = Current_docker.Default
 
 (* Limit to one build at a time. *)
 let pool = Current.Pool.create ~label:"docker" 1
@@ -29,9 +28,9 @@ let () = Prometheus_unix.Logging.init ()
 let url = Uri.of_string "http://localhost:8080"
 
 (* Generate a Dockerfile for building all the opam packages in the build context. *)
-let dockerfile ~base =
+let dockerfile ~base_hash =
   let open Dockerfile in
-  from (Docker.Image.hash base) @@
+  from base_hash @@
   run "sudo ln -f /usr/bin/opam-2.1 /usr/bin/opam" @@
   run "opam init --reinit -n" @@
   workdir "/src" @@
@@ -56,21 +55,6 @@ let check_run_status x =
   | Some { Current.Metadata.job_id; _ } -> github_check_run_status_of_state ?job_id state
   | None -> github_check_run_status_of_state state
 
-let pipeline ~docker ~git ~app () =
-  let dockerfile =
-    let+ base = Docker.pull docker ~schedule:weekly "ocaml/opam:alpine-3.13-ocaml-4.13" in
-    `Contents (dockerfile ~base)
-  in
-  Github.App.installations app |> Current.list_iter (module Github.Installation) @@ fun installation ->
-  let repos = Github.Installation.repositories installation in
-  repos |> Current.list_iter ~collapse_key:"repo" (module Github.Api.Repo) @@ fun repo ->
-  Github.Api.Repo.ci_refs ~staleness:(Duration.of_day 90) repo
-  |> Current.list_iter (module Github.Api.Commit) @@ fun head ->
-  let src = Git.fetch git (Current.map Github.Api.Commit.id head) in
-  Docker.build docker ~pool ~pull:false ~dockerfile (`Git src)
-  |> check_run_status
-  |> Github.Api.CheckRun.set_status head program_name
-
 let main config mode app_config =
   Eio_main.run @@ fun env ->
   Eio.Switch.run @@ fun sw ->
@@ -80,10 +64,25 @@ let main config mode app_config =
   let engine =
     Current.Engine.create ~sw ~env ~config (fun engine ->
       let git = Current_git.create ~engine in
-      let docker = Docker.create ~engine ~git in
+      let module Docker = Current_docker.Default () (struct
+        let caps = Current_cache.caps_of_engine engine
+        let git = git
+      end) in
       let app = Current_github.App.create ~engine ~net app_config in
       Eio.Promise.resolve app_r app;
-      pipeline ~docker ~git ~app ())
+      let dockerfile =
+        let+ base = Docker.pull ~schedule:weekly "ocaml/opam:alpine-3.13-ocaml-4.13" in
+        `Contents (dockerfile ~base_hash:(Docker.Image.hash base))
+      in
+      Github.App.installations app |> Current.list_iter (module Github.Installation) @@ fun installation ->
+      let repos = Github.Installation.repositories installation in
+      repos |> Current.list_iter ~collapse_key:"repo" (module Github.Api.Repo) @@ fun repo ->
+      Github.Api.Repo.ci_refs ~staleness:(Duration.of_day 90) repo
+      |> Current.list_iter (module Github.Api.Commit) @@ fun head ->
+      let src = Git.fetch git (Current.map Github.Api.Commit.id head) in
+      Docker.build ~pool ~pull:false ~dockerfile (`Git src)
+      |> check_run_status
+      |> Github.Api.CheckRun.set_status head program_name)
   in
   let app = Eio.Promise.await app_p in
   let webhook_secret = Current_github.App.webhook_secret app in

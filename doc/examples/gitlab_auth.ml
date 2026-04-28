@@ -4,18 +4,11 @@
 let program_name = "auth"
 
 module Git = Current_git
-module Docker = Current_docker.Default
 
 let pull = false
 let timeout = Duration.of_min 50
 
 let () = Prometheus_unix.Logging.init ()
-
-(* Run "docker build" on the latest commit in Git repository [repo]. *)
-let pipeline ~docker ~repo () =
-  let src = Git.Local.head_commit repo in
-  let image = Docker.build docker ~pull ~timeout (`Git src) in
-  Docker.run docker image ~args:["dune"; "exec"; "--"; "doc/examples/docker_build_local.exe"; "--help"]
 
 (* Access control policy. *)
 let has_role user role =
@@ -37,8 +30,14 @@ let main config mode repo auth_config =
   let engine =
     Current.Engine.create ~sw ~env ~config (fun engine ->
       let git = Current_git.create ~engine in
-      let docker = Docker.create ~engine ~git in
-      pipeline ~docker ~repo ())
+      let module Docker = Current_docker.Default () (struct
+        let caps = Current_cache.caps_of_engine engine
+        let git = git
+      end) in
+      (* Run "docker build" on the latest commit in Git repository [repo]. *)
+      let src = Git.Local.head_commit repo in
+      let image = Docker.build ~pull ~timeout (`Git src) in
+      Docker.run image ~args:["dune"; "exec"; "--"; "doc/examples/docker_build_local.exe"; "--help"])
   in
   let authn = Option.map Current_gitlab.Auth.make_login_uri auth in
   let routes =

@@ -13,7 +13,6 @@ open Current.Syntax
 
 module Git = Current_git
 module Gitlab = Current_gitlab
-module Docker = Current_docker.Default
 
 (* Limit to one build at a time. *)
 let pool = Current.Pool.create ~label:"docker" 1
@@ -24,9 +23,9 @@ let () = Prometheus_unix.Logging.init ()
 let url = Uri.of_string "http://localhost:8080"
 
 (* Generate a Dockerfile for building all the opam packages in the build context. *)
-let dockerfile ~base =
+let dockerfile ~base_hash =
   let open Dockerfile in
-  from (Docker.Image.hash base) @@
+  from base_hash @@
   run "sudo ln -f /usr/bin/opam-2.1 /usr/bin/opam" @@
   run "opam init --reinit -n" @@
   workdir "/src" @@
@@ -43,20 +42,6 @@ let gitlab_status_of_state = function
   | Error (`Active _) -> Gitlab.Api.Status.v ~url `Pending ~name:program_name
   | Error (`Msg m)    -> Gitlab.Api.Status.v ~url `Failure ~description:m ~name:program_name
 
-let pipeline ~docker ~git ~gitlab ~repo_id () =
-  let dockerfile =
-    let+ base = Docker.pull docker ~schedule:weekly "ocaml/opam:alpine-3.13-ocaml-4.13" in
-    `Contents (dockerfile ~base)
-  in
-  Gitlab.Api.ci_refs gitlab ~staleness:(Duration.of_day 90) repo_id
-  |> Current.list_iter (module Gitlab.Api.Commit) @@ fun head ->
-  let src = Git.fetch git (Current.map Gitlab.Api.Commit.id head) in
-
-  Docker.build docker ~pool ~pull:false ~dockerfile (`Git src)
-  |> Current.state
-  |> Current.map gitlab_status_of_state
-  |> Gitlab.Api.Commit.set_status head program_name
-
 let main config mode gitlab_config repo =
   Eio_main.run @@ fun env ->
   Eio.Switch.run @@ fun sw ->
@@ -66,10 +51,23 @@ let main config mode gitlab_config repo =
   let engine =
     Current.Engine.create ~sw ~env ~config (fun engine ->
       let git = Current_git.create ~engine in
-      let docker = Docker.create ~engine ~git in
+      let module Docker = Current_docker.Default () (struct
+        let caps = Current_cache.caps_of_engine engine
+        let git = git
+      end) in
       let gitlab = Gitlab.Api.create ~engine ~net gitlab_config in
       Eio.Promise.resolve gitlab_r gitlab;
-      pipeline ~docker ~git ~gitlab ~repo_id:repo ())
+      let dockerfile =
+        let+ base = Docker.pull ~schedule:weekly "ocaml/opam:alpine-3.13-ocaml-4.13" in
+        `Contents (dockerfile ~base_hash:(Docker.Image.hash base))
+      in
+      Gitlab.Api.ci_refs gitlab ~staleness:(Duration.of_day 90) repo
+      |> Current.list_iter (module Gitlab.Api.Commit) @@ fun head ->
+      let src = Git.fetch git (Current.map Gitlab.Api.Commit.id head) in
+      Docker.build ~pool ~pull:false ~dockerfile (`Git src)
+      |> Current.state
+      |> Current.map gitlab_status_of_state
+      |> Gitlab.Api.Commit.set_status head program_name)
   in
   let gitlab = Eio.Promise.await gitlab_p in
   let routes =

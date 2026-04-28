@@ -11,13 +11,12 @@ let program_name = "build_matrix"
 open Current.Syntax
 
 module Git = Current_git
-module Docker = Current_docker.Default
 
 let () = Prometheus_unix.Logging.init ()
 
-let dockerfile ~base ~ocaml_version =
+let dockerfile ~base_hash ~ocaml_version =
   let open Dockerfile in
-  from (Docker.Image.hash base) @@
+  from base_hash @@
   run "sudo ln -f /usr/bin/opam-2.1 /usr/bin/opam" @@
   run "opam init --reinit -n" @@
   run "opam switch %s" ocaml_version @@
@@ -35,16 +34,16 @@ let dockerfile ~base ~ocaml_version =
 let weekly = Current_cache.Schedule.v ~valid_for:(Duration.of_day 7) ()
 
 (* Run "docker build" on the latest commit in Git repository [repo]. *)
-let pipeline ~docker ~repo () =
+let pipeline (module Docker : Current_docker.S.DOCKER) ~repo () =
   let src = Git.Local.head_commit repo in
   let build ocaml_version =
-    let base = Docker.pull docker ~schedule:weekly ("ocaml/opam:debian-ocaml-" ^ ocaml_version) in
+    let base = Docker.pull ~schedule:weekly ("ocaml/opam:debian-ocaml-" ^ ocaml_version) in
     let dockerfile =
       let+ base = base in
-      `Contents (dockerfile ~base ~ocaml_version)
+      `Contents (dockerfile ~base_hash:(Docker.Image.hash base) ~ocaml_version)
     in
-    Docker.build docker ~label:ocaml_version ~pull:false ~dockerfile (`Git src) |>
-    Docker.tag docker ~tag:(Fmt.str "example-%s" ocaml_version)
+    Docker.build ~label:ocaml_version ~pull:false ~dockerfile (`Git src) |>
+    Docker.tag ~tag:(Fmt.str "example-%s" ocaml_version)
   in
   Current.all [
     build "4.10";
@@ -62,8 +61,11 @@ let main config mode repo =
   let engine =
     Current.Engine.create ~sw ~env ~config (fun engine ->
       let git = Current_git.create ~engine in
-      let docker = Docker.create ~engine ~git in
-      pipeline ~docker ~repo ())
+      let module Docker = Current_docker.Default () (struct
+        let caps = Current_cache.caps_of_engine engine
+        let git = git
+      end) in
+      pipeline (module Docker) ~repo ())
   in
   let site = Current_web.Site.(v ~has_role:allow_all) ~name:program_name (Current_web.routes engine) in
   Current_web.run ~net ~mode site

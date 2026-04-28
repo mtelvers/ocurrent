@@ -1,7 +1,6 @@
 let program_name = "docker_build_local"
 
 module Git = Current_git
-module Docker = Current_docker.Default
 
 let pull = false    (* Whether to check for updates using "docker build --pull" *)
 
@@ -12,13 +11,12 @@ let () = Prometheus_unix.Logging.init ()
 (* included in doc/example_pipelines.md as code snippet *)
 [@@@part "pipeline"]
 (* Run "docker build" on the latest commit in Git repository [repo]. *)
-let pipeline ~docker ~repo () =
+let pipeline (module Docker : Current_docker.S.DOCKER) ~repo () =
   let src = Git.Local.head_commit repo in
-  let image = Docker.build docker ~pull ~timeout (`Git src) in
-  Docker.run docker image ~args:["dune"; "exec"; "--"; "docker_build_local"; "--help"]
+  let image = Docker.build ~pull ~timeout (`Git src) in
+  Docker.run image ~args:["dune"; "exec"; "--"; "docker_build_local"; "--help"]
 
 [@@@part "end-pipeline"]
-
 
 let find_git_root ~process_mgr dir =
   let out =
@@ -37,8 +35,11 @@ let main config mode repo =
   let engine =
     Current.Engine.create ~sw ~env ~config (fun engine ->
       let git = Current_git.create ~engine in
-      let docker = Docker.create ~engine ~git in
-      pipeline ~docker ~repo ())
+      let module Docker = Current_docker.Default () (struct
+        let caps = Current_cache.caps_of_engine engine
+        let git = git
+      end) in
+      pipeline (module Docker) ~repo ())
   in
   let site = Current_web.Site.(v ~has_role:allow_all) ~name:program_name (Current_web.routes engine) in
   Current_web.run ~net ~mode site

@@ -13,7 +13,6 @@ open Current.Syntax
 
 module Git = Current_git
 module Github = Current_github
-module Docker = Current_docker.Default
 
 let () = Prometheus_unix.Logging.init ()
 
@@ -21,9 +20,9 @@ let () = Prometheus_unix.Logging.init ()
 let url = Uri.of_string "http://localhost:8080"
 
 (* Generate a Dockerfile for building all the opam packages in the build context. *)
-let dockerfile ~base =
+let dockerfile ~base_hash =
   let open Dockerfile in
-  from (Docker.Image.hash base) @@
+  from base_hash @@
   run "sudo ln -f /usr/bin/opam-2.1 /usr/bin/opam" @@
   run "opam init --reinit -n" @@
   workdir "/src" @@
@@ -41,18 +40,6 @@ let github_status_of_state = function
   | Error (`Active _) -> Github.Api.Status.v ~url `Pending
   | Error (`Msg m)    -> Github.Api.Status.v ~url `Failure ~description:m
 
-let pipeline ~docker ~git ~github ~repo () =
-  let head = Github.Api.head_commit github repo in
-  let src = Git.fetch git (Current.map Github.Api.Commit.id head) in
-  let dockerfile =
-    let+ base = Docker.pull docker ~schedule:weekly "ocaml/opam:alpine-3.13-ocaml-4.13" in
-    `Contents (dockerfile ~base)
-  in
-  Docker.build docker ~pull:false ~dockerfile (`Git src)
-  |> Current.state
-  |> Current.map github_status_of_state
-  |> Github.Api.Commit.set_status head "ocurrent"
-
 let main config mode github_config repo =
   Eio_main.run @@ fun env ->
   Eio.Switch.run @@ fun sw ->
@@ -62,10 +49,22 @@ let main config mode github_config repo =
   let engine =
     Current.Engine.create ~sw ~env ~config (fun engine ->
       let git = Current_git.create ~engine in
-      let docker = Docker.create ~engine ~git in
+      let module Docker = Current_docker.Default () (struct
+        let caps = Current_cache.caps_of_engine engine
+        let git = git
+      end) in
       let github = Github.Api.create ~engine ~net github_config in
       Eio.Promise.resolve github_r github;
-      pipeline ~docker ~git ~github ~repo ())
+      let head = Github.Api.head_commit github repo in
+      let src = Git.fetch git (Current.map Github.Api.Commit.id head) in
+      let dockerfile =
+        let+ base = Docker.pull ~schedule:weekly "ocaml/opam:alpine-3.13-ocaml-4.13" in
+        `Contents (dockerfile ~base_hash:(Docker.Image.hash base))
+      in
+      Docker.build ~pull:false ~dockerfile (`Git src)
+      |> Current.state
+      |> Current.map github_status_of_state
+      |> Github.Api.Commit.set_status head "ocurrent")
   in
   let github = Eio.Promise.await github_p in
   (* this example does not have support for looking up job_ids for a commit *)
