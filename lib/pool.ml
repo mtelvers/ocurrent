@@ -111,7 +111,7 @@ let create = Local.create
 
 let of_fn ~label get =
   { name = label;
-    get = fun ~priority ~sw ~register_cancel:_ -> get ~priority ~sw }
+    get = fun ~priority ~sw ~register_cancel -> get ~priority ~sw ~register_cancel }
 
 let get t ~priority ~sw ?(register_cancel=ignore) () =
   t.get ~priority ~sw ~register_cancel

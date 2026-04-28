@@ -6,8 +6,15 @@ val create : label:string -> int -> unit t
 
 val of_fn :
   label : string ->
-  (priority:priority -> sw:Eio.Switch.t -> 'a) ->
+  (priority:priority ->
+   sw:Eio.Switch.t ->
+   register_cancel:((unit -> unit) -> unit) ->
+   'a) ->
   'a t
+(** [of_fn ~label f] is a pool that uses [f] to acquire a resource.
+    [register_cancel cancel] arranges for [cancel ()] to be invoked if
+    the pool consumer is cancelled. Implementations that abort on [sw]
+    closure may ignore it. *)
 
 val get :
   'a t ->

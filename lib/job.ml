@@ -26,6 +26,11 @@ type t = {
   set_start_time : float Eio.Promise.u;
   start_time : float Eio.Promise.t;
   mutable path : Fpath.t option;
+  mutable log_fd : Unix.file_descr option;
+  (* The log fd is held open for the lifetime of the job and closed on
+     [switch] release. Each [Job.write] is a single [Unix.write] — no
+     open/close churn on the hot path, and no Eio yields on the build
+     fiber before [Cache.run] has had a chance to register [t.job_id]. *)
   log_cond : Eio.Condition.t;     (* Fires whenever log data is written, or log is closed. *)
   log_mutex : Eio.Mutex.t;
   explicit_confirm : unit Eio.Promise.t;
@@ -40,15 +45,18 @@ let temp_file ~dir ~prefix ~suffix =
   let path = Filename.temp_file ~temp_dir:(Fpath.to_string dir) prefix suffix in
   Fpath.v path
 
+let rec write_all fd buf off len =
+  if len = 0 then ()
+  else
+    let n = Unix.write_substring fd buf off len in
+    if n = 0 then failwith "Job.write: short write"
+    else write_all fd buf (off + n) (len - n)
+
 let write t msg =
-  match t.path with
+  match t.log_fd with
   | None -> Log.err (fun f -> f "Job.write(%s, %S) called on closed job" t.id msg)
-  | Some path ->
-    let ch = open_out_gen [Open_wronly; Open_append] 0o600 (Fpath.to_string path) in
-    Fun.protect ~finally:(fun () -> close_out ch) (fun () ->
-      output_string ch msg;
-      flush ch;
-    );
+  | Some fd ->
+    write_all fd msg 0 (String.length msg);
     Eio.Condition.broadcast t.log_cond
 
 let log t fmt =
@@ -128,8 +136,13 @@ let create ?(priority=`Low) ~sw ~clock ~process_mgr ~fs ~label ~config () =
     let log_mutex = Eio.Mutex.create () in
     let explicit_confirm, set_explicit_confirm = Eio.Promise.create () in
     let cancel_hooks = `Hooks (Lwt_dllist.create ()) in
+    let log_fd =
+      Unix.openfile (Fpath.to_string path)
+        [Unix.O_WRONLY; Unix.O_APPEND; Unix.O_CREAT] 0o600
+    in
     let t = { switch = sw; clock; process_mgr; fs;
-              id; path = Some path; start_time; set_start_time; config; log_cond; log_mutex; cancel_hooks;
+              id; path = Some path; log_fd = Some log_fd;
+              start_time; set_start_time; config; log_cond; log_mutex; cancel_hooks;
               explicit_confirm; set_explicit_confirm; waiting_for_confirmation = false; priority } in
     jobs := Map.add id t !jobs;
     Prometheus.Gauge.inc_one Metrics.active_jobs;
@@ -141,7 +154,12 @@ let create ?(priority=`Low) ~sw ~clock ~process_mgr ~fs ~label ~config () =
             run_cancel_hooks ~reason hooks
           | `Cancelled _ -> ()
         end;
+        (* Drop the fd handle before close so a concurrent Job.write
+           sees None and doesn't race against a closed descriptor. *)
+        let fd = t.log_fd in
+        t.log_fd <- None;
         t.path <- None;
+        Option.iter (fun fd -> try Unix.close fd with _ -> ()) fd;
         jobs := Map.remove id !jobs;
         Prometheus.Gauge.dec_one Metrics.active_jobs;
         Eio.Condition.broadcast t.log_cond
@@ -180,7 +198,7 @@ let use_pool ?(priority=`Low) ~sw t pool =
   Pool.get ~priority ~sw ~register_cancel pool ()
 
 let no_pool =
-  Pool.of_fn ~label:"no pool" (fun ~priority:_ ~sw:_ -> ())
+  Pool.of_fn ~label:"no pool" (fun ~priority:_ ~sw:_ ~register_cancel:_ -> ())
 
 let confirm t ~pool level =
   (match t.config.Config.confirm with

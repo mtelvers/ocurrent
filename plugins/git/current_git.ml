@@ -103,7 +103,7 @@ let with_checkout t ?pool ~job commit fn =
   let short_hash = Astring.String.with_range ~len:8 id.Commit_id.hash in
   Current.Job.log job "@[<v2>Checking out commit %s. To reproduce:@,%a@]"
     short_hash Commit_id.pp_user_clone id;
-  Current.Process.with_tmpdir ~prefix:"git-checkout" @@ fun tmpdir ->
+  Current.Process.with_tmpdir ~job ~prefix:"git-checkout" @@ fun tmpdir ->
   (* Pool (if any) is held for the clone operations only. Releasing it
      before [fn tmpdir] runs means other clones can start while [fn] is
      still working with the checkout. *)

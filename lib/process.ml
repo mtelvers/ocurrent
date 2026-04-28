@@ -19,54 +19,29 @@ let check_status pp_cmd cmd = function
   | `Exited x -> Fmt.error_msg "%t exited with status %d" pp_cmd x
   | `Signaled x -> Fmt.error_msg "%t failed with signal %a" pp_cmd Fmt.Dump.signal x
 
-let make_tmp_dir ?(prefix = "tmp-") ?(mode = 0o700) parent =
+let make_tmp_dir ~fs ?(prefix = "tmp-") ?(mode = 0o700) parent =
   let rec mktmp = function
     | 0 -> Fmt.failwith "Failed to generate temporary directory name!"
     | n ->
-      let tmppath =
-        Printf.sprintf "%s/%s%x" parent prefix (Random.int 0x3fffffff)
-      in
+      let path_str = Printf.sprintf "%s/%s%x" parent prefix (Random.int 0x3fffffff) in
+      let eio_path = Eio.Path.(fs / path_str) in
       try
-        Unix.mkdir tmppath mode;
-        tmppath
-      with Unix.Unix_error (Unix.EEXIST, _, _) ->
-        Log.warn (fun f -> f "Temporary directory %s already exists!" tmppath);
+        Eio.Path.mkdir ~perm:mode eio_path;
+        eio_path, Fpath.v path_str
+      with Eio.Io (Eio.Fs.E (Already_exists _), _) ->
+        Log.warn (fun f -> f "Temporary directory %s already exists!" path_str);
         mktmp (n - 1)
   in
   mktmp 10
 
-let rec rm_f_tree path =
-  let info = Unix.lstat path in
-  match info.Unix.st_kind with
-  | Unix.S_REG | Unix.S_LNK | Unix.S_BLK | Unix.S_CHR | Unix.S_SOCK
-  | Unix.S_FIFO ->
-    (try Unix.unlink path
-     with Unix.Unix_error (Unix.EACCES, _, _) when Sys.win32 ->
-       (* Try removing the read-only attribute before retrying unlink. *)
-       (try
-          let { Unix.st_perm; _ } = Unix.lstat path in
-          Unix.chmod path 0o666;
-          (try Unix.unlink path
-           with _ ->
-             (* If removal still failed, restore original permissions *)
-             (try Unix.chmod path st_perm with _ -> ());
-             raise Exit)
-        with _ -> raise Exit))
-  | Unix.S_DIR ->
-    Unix.chmod path 0o700;
-    let entries = Sys.readdir path in
-    Array.iter (function
-      | "." | ".." -> ()
-      | leaf -> rm_f_tree (Filename.concat path leaf)) entries;
-    Unix.rmdir path
-
-let with_tmpdir ?prefix fn =
-  let tmpdir = make_tmp_dir ?prefix ~mode:0o700 (Filename.get_temp_dir_name ()) in
+let with_tmpdir ~job ?prefix fn =
+  let fs = Job.fs job in
+  let eio_path, fpath = make_tmp_dir ~fs ?prefix ~mode:0o700 (Filename.get_temp_dir_name ()) in
   Fun.protect
-    (fun () -> fn (Fpath.v tmpdir))
+    (fun () -> fn fpath)
     ~finally:(fun () ->
-      try rm_f_tree tmpdir
-      with ex -> Log.warn (fun f -> f "Error cleaning up %s: %a" tmpdir Fmt.exn ex))
+      try Eio.Path.rmtree ~missing_ok:true eio_path
+      with ex -> Log.warn (fun f -> f "Error cleaning up %a: %a" Fpath.pp fpath Fmt.exn ex))
 
 let pp_command pp_cmd cmd f = Fmt.pf f "Command %a" pp_cmd cmd
 
@@ -113,19 +88,23 @@ let exec ?cwd ?(stdin="") ?(pp_cmd = pp_cmd) ?pp_error_command ?env ~cancellable
   Eio.Flow.close stdin_r;
   Eio.Flow.close stdout_w;
   add_shutdown_hooks ~cancellable ~job ~cmd proc;
-  let stdin_result = ref (Ok ()) in
+  let stdin_done, set_stdin_done = Eio.Promise.create () in
   Eio.Fiber.both
     (fun () ->
-      (try
-         Eio.Flow.copy_string stdin stdin_w;
-         Eio.Flow.close stdin_w
-       with ex ->
-         stdin_result := Error (`Msg (Printexc.to_string ex));
-         (try Eio.Flow.close stdin_w with _ -> ())))
+      let result =
+        try
+          Eio.Flow.copy_string stdin stdin_w;
+          Eio.Flow.close stdin_w;
+          Ok ()
+        with ex ->
+          (try Eio.Flow.close stdin_w with _ -> ());
+          Error (`Msg (Printexc.to_string ex))
+      in
+      Eio.Promise.resolve set_stdin_done result)
     (fun () -> copy_to_log ~job stdout_r);
   let status = Eio.Process.await proc in
   match check_status pp_error_command cmd status with
-  | Ok () -> !stdin_result
+  | Ok () -> Eio.Promise.await stdin_done
   | Error _ as e -> e
 
 let check_output ?cwd ?(stdin="") ?(pp_cmd = pp_cmd) ?pp_error_command ~cancellable ~job cmd =
@@ -153,26 +132,31 @@ let check_output ?cwd ?(stdin="") ?(pp_cmd = pp_cmd) ?pp_error_command ~cancella
   Eio.Flow.close stdout_w;
   Eio.Flow.close stderr_w;
   add_shutdown_hooks ~cancellable ~job ~cmd proc;
-  let stdin_result = ref (Ok ()) in
-  let stdout = ref "" in
+  let stdin_done, set_stdin_done = Eio.Promise.create () in
+  let stdout_done, set_stdout_done = Eio.Promise.create () in
   Eio.Fiber.all [
     (fun () ->
-      (try
-         Eio.Flow.copy_string stdin stdin_w;
-         Eio.Flow.close stdin_w
-       with ex ->
-         stdin_result := Error (`Msg (Printexc.to_string ex));
-         (try Eio.Flow.close stdin_w with _ -> ())));
+      let result =
+        try
+          Eio.Flow.copy_string stdin stdin_w;
+          Eio.Flow.close stdin_w;
+          Ok ()
+        with ex ->
+          (try Eio.Flow.close stdin_w with _ -> ());
+          Error (`Msg (Printexc.to_string ex))
+      in
+      Eio.Promise.resolve set_stdin_done result);
     (fun () ->
       (* 100 MiB is enough for all realistic check_output use; prevents
          unbounded memory growth if a subprocess goes mad. *)
-      stdout := Eio.Buf_read.(of_flow ~max_size:(100 * 1024 * 1024) stdout_r |> take_all));
+      let s = Eio.Buf_read.(of_flow ~max_size:(100 * 1024 * 1024) stdout_r |> take_all) in
+      Eio.Promise.resolve set_stdout_done s);
     (fun () -> copy_to_log ~job stderr_r);
   ];
   let status = Eio.Process.await proc in
   match check_status pp_error_command cmd status with
   | Error _ as e -> e
   | Ok () ->
-    match !stdin_result with
+    match Eio.Promise.await stdin_done with
     | Error _ as e -> e
-    | Ok () -> Ok !stdout
+    | Ok () -> Ok (Eio.Promise.await stdout_done)

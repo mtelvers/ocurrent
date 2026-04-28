@@ -161,6 +161,17 @@ module Unit : sig
   val unmarshal : string -> t
 end
 
+(** Small Eio.Switch helpers shared between the engine and the cache. *)
+module Switch_ext : sig
+  val spawn_managed : parent_sw:Eio.Switch.t -> Eio.Switch.t * unit Eio.Promise.u
+  (** [spawn_managed ~parent_sw] is a fresh switch attached to [parent_sw]
+      that lives until the returned resolver is resolved (or [parent_sw]
+      is torn down). The inner [Switch.run] still waits for child fibers
+      before closing, so resolving the resolver is a request to release —
+      not a forced stop. Used by {!Monitor} (one switch per activation)
+      and {!Current_cache} instance slots. *)
+end
+
 (** Resource pools, to control how many jobs can use a resource at a time.
     To use a pool within a job, pass the pool to {!Job.start} or call {!Job.use_pool}. *)
 module Pool : sig
@@ -174,11 +185,20 @@ module Pool : sig
 
   val of_fn :
     label : string ->
-    (priority:priority -> sw:Eio.Switch.t -> 'a) ->
+    (priority:priority ->
+     sw:Eio.Switch.t ->
+     register_cancel:((unit -> unit) -> unit) ->
+     'a) ->
     'a t
   (** [of_fn ~label f] is a pool that uses [f] to get a resource.
       The function should suspend the fiber until a resource is available.
-      Return the resource to the pool when [sw] is released. *)
+      Return the resource to the pool when [sw] is released.
+
+      [register_cancel cancel] arranges for [cancel ()] to be called if
+      the pool consumer (e.g. {!Job.use_pool}) is cancelled while waiting.
+      Implementations that already abort on [sw] closure can ignore it,
+      but registering it makes job-level cancellation prompt instead of
+      relying on Eio cancellation propagating into [f]'s await. *)
 end
 
 (** Jobs with log files. This is mostly an internal interface - use {!Current_cache} instead. *)
@@ -407,9 +427,12 @@ module Process : sig
     string or_error
   (** Like [exec], but return the child's stdout as a string rather than writing it to the log. *)
 
-  val with_tmpdir : ?prefix:string -> (Fpath.t -> 'a) -> 'a
-  (** [with_tmpdir fn] creates a temporary directory, runs [fn tmpdir], and then deletes the directory
-      (recursively).
+  val with_tmpdir : job:Job.t -> ?prefix:string -> (Fpath.t -> 'a) -> 'a
+  (** [with_tmpdir ~job fn] creates a temporary directory under
+      {!Filename.get_temp_dir_name}, runs [fn tmpdir], and then deletes the
+      directory (recursively). Mkdir/rmtree go through {!Eio.Path} using
+      [job]'s [fs] capability, so no synchronous Unix syscalls block the
+      scheduler.
       @param prefix Allows giving the directory a more meaningful name (for debugging). *)
 end
 

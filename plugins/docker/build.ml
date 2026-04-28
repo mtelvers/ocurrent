@@ -60,9 +60,9 @@ let or_raise = function
 
 let with_context ~git ~job context fn =
   match context with
-  | `No_context -> Current.Process.with_tmpdir ~prefix:"build-context-" fn
+  | `No_context -> Current.Process.with_tmpdir ~job ~prefix:"build-context-" fn
   | `Dir path ->
-      Current.Process.with_tmpdir ~prefix:"build-context-" @@ fun dir ->
+      Current.Process.with_tmpdir ~job ~prefix:"build-context-" @@ fun dir ->
       let* () =
         Current.Process.exec ~cwd:dir ~cancellable:true ~job
           ["rsync"; "-aHq"; Fpath.to_string path ^ "/"; "."]

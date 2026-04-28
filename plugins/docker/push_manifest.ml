@@ -42,7 +42,7 @@ let or_fail = function
 
 let publish auth job tag value =
   Current.Job.start job ~level:Current.Level.Dangerous;
-  Current.Process.with_tmpdir ~prefix:"push-manifest" @@ fun config ->
+  Current.Process.with_tmpdir ~job ~prefix:"push-manifest" @@ fun config ->
   Bos.OS.File.write Fpath.(config / "config.json") {|{"experimental": "enabled"}|} |> or_fail;
   let* () = Auth.login ~config ~docker_context:None ~job auth in
   Prometheus.Gauge.inc_one Metrics.docker_push_manifest_events;

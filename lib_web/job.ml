@@ -5,7 +5,11 @@ let sep = "@@LOG@@"
 
 let max_log_chunk_size = 102400L  (* 100K at a time *)
 
+(* Each web request that reads a log chunk runs the open / seek / read
+   on a sys-thread so the Eio scheduler isn't blocked while the kernel
+   is doing the disk read. *)
 let read ~start path =
+  Eio_unix.run_in_systhread @@ fun () ->
   let ch = open_in_bin (Fpath.to_string path) in
   Fun.protect ~finally:(fun () -> close_in ch) @@ fun () ->
   let len = LargeFile.in_channel_length ch in

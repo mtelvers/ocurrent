@@ -27,8 +27,13 @@ type t = Cohttp_eio.Client.t
 
 let create ~net = Cohttp_eio.Client.make ~https:(Some https_handler) net
 
+(* Cap at 100 MiB. Real GitHub/GitLab/Slack responses are well under
+   this; the bound just prevents a misbehaving server (or a redirect
+   loop on a binary endpoint) from exhausting memory. *)
+let max_body_size = 100 * 1024 * 1024
+
 let read_body body =
-  Eio.Buf_read.(of_flow ~max_size:max_int body |> take_all)
+  Eio.Buf_read.(of_flow ~max_size:max_body_size body |> take_all)
 
 let get t ?(headers=Cohttp.Header.init ()) uri =
   Eio.Switch.run @@ fun sw ->

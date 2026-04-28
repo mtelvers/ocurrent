@@ -117,9 +117,10 @@ let test env ?config ?clock ?final_stats ~name v_fn actions =
         1. publish-fork's confirm-await wakes, runs through to publish-body's yield;
         2. notify-on-start (on job_sw) wakes after start_time resolves, hits its own yield;
         3. publish-fork resumes, Switch.run job_sw waits for the child notify-on-start;
-        4. notify-on-start runs [notify t] → [Engine.update ()] resolves [next].
-       Four scheduler ticks. *)
-    wait 4
+        4. notify-on-start runs [notify t] → [Engine.update ()] increments the signal counter;
+        5. the bridge fiber wakes from its [Cond.await] and resolves [next].
+       Five scheduler ticks. *)
+    wait 5
   in
   try
     Eio.Switch.run (fun sw ->

@@ -67,7 +67,10 @@ module Engine = struct
   module Step = struct
     type t = < >
     let create () = object end
-    let equal = (=)
+    (* Steps are empty objects, used only as identity tokens. Use [(==)]
+       so the intent ("same allocation?") is explicit and we skip the
+       polymorphic-equality call. *)
+    let equal = (==)
     let current_step = ref (create ())
     let now () = !current_step
     let advance () =
@@ -113,32 +116,33 @@ module Engine = struct
       fn ();
       flush_release_queue ()
 
-  (* Signal that the next evaluation should start. One producer (update) plus
-     the engine loop as consumer. We use a mutable promise/resolver pair so
-     that [update] can be called from any fiber and its effect is observed by
-     the engine's next iteration. *)
-  let next_eval_mu = Eio.Mutex.create ()
-  let next_eval_ref : (unit Eio.Promise.t * unit Eio.Promise.u) option ref = ref None
+  (* Wake-up signal as a monotonically-increasing counter. Any number of
+     producers ([update]) plus the engine loop as consumer. Each iteration
+     snapshots [counter] and waits for it to advance past that watermark —
+     so updates issued *before* the iteration began (e.g. during pipeline
+     init) don't cause a spurious wakeup, but updates that arrive *during*
+     the iteration do. *)
+  let signal_mu = Eio.Mutex.create ()
+  let signal_cond = Eio.Condition.create ()
+  let counter = ref 0
 
-  let next_evaluation () =
-    Eio.Mutex.use_rw ~protect:false next_eval_mu @@ fun () ->
-    match !next_eval_ref with
-    | Some (p, _) -> p
-    | None ->
-      let p, r = Eio.Promise.create () in
-      next_eval_ref := Some (p, r);
-      p
-
+  (* [use_rw ~protect:true] for the writer so an unlikely cancel during
+     the increment doesn't poison the mutex; [use_ro] for the readers so
+     a cancellation of the bridge fiber inside [Cond.await] simply
+     releases the lock without disabling it. *)
   let update () =
-    let to_resolve =
-      Eio.Mutex.use_rw ~protect:false next_eval_mu @@ fun () ->
-      match !next_eval_ref with
-      | None -> None
-      | Some (_, r) ->
-        next_eval_ref := None;
-        Some r
-    in
-    Option.iter (fun r -> Eio.Promise.resolve r ()) to_resolve
+    Eio.Mutex.use_rw ~protect:true signal_mu @@ fun () ->
+    incr counter;
+    Eio.Condition.broadcast signal_cond
+
+  let signal_snapshot () =
+    Eio.Mutex.use_ro signal_mu @@ fun () -> !counter
+
+  let wait_above ~min =
+    Eio.Mutex.use_ro signal_mu @@ fun () ->
+    while !counter <= min do
+      Eio.Condition.await signal_cond signal_mu
+    done
 
   let booting = {
     value = Error (`Active `Running);
@@ -166,7 +170,15 @@ module Engine = struct
       switch = sw; clock; fs; process_mgr; net; cache_registry;
     } in
     let rec aux outcome =
-      let next = next_evaluation () in
+      (* Bridge the signal counter to a per-iteration promise so [trace]
+         can observe a [~next] handle. The fiber sleeps until [counter]
+         advances past this iteration's snapshot; any updates issued
+         before now have already been absorbed by [propagate] below. *)
+      let baseline = signal_snapshot () in
+      let next, set_next = Eio.Promise.create () in
+      Eio.Fiber.fork ~sw (fun () ->
+        wait_above ~min:baseline;
+        Eio.Promise.resolve set_next ());
       Log.debug (fun f -> f "Evaluating...");
       let t0 = Unix.gettimeofday () in
       Current_incr.propagate ();
@@ -282,20 +294,9 @@ module Monitor = struct
     mutex : Eio.Mutex.t;
   }
 
-  (* Spawn a fresh switch for one activation of a monitor: the daemon body
-     runs inside [Switch.run mon_sw], so any sub-fibers it forks attach
-     there. The switch closes when [release_r] is resolved (which we do
-     when [enable] returns [`Finished]) or when the parent switch is torn
-     down. Same shape as [Current_cache.spawn_slot_switch]. *)
-  let spawn_monitor_switch ~parent_sw =
-    let sw_p, sw_r = Eio.Promise.create () in
-    let release_p, release_r = Eio.Promise.create () in
-    Eio.Fiber.fork_daemon ~sw:parent_sw (fun () ->
-      Eio.Switch.run (fun mon_sw ->
-        Eio.Promise.resolve sw_r mon_sw;
-        Eio.Promise.await release_p);
-      `Stop_daemon);
-    Eio.Promise.await sw_p, release_r
+  (* One activation of a monitor lives in its own switch (a child of the
+     engine's). Same shape as cache instance slots — see {!Switch_ext}. *)
+  let spawn_monitor_switch = Switch_ext.spawn_managed
 
   let catch t fn =
     try fn ()
@@ -410,6 +411,7 @@ end
 let state_dir = Disk_store.state_dir
 
 module Db = Db
+module Switch_ext = Switch_ext
 module Process = Process
 module Pool = Pool
 module Log_matcher = Log_matcher

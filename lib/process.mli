@@ -15,4 +15,8 @@ val check_output :
   cancellable:bool -> job:Job.t -> string list ->
   string Current_term.S.or_error
 
-val with_tmpdir : ?prefix:string -> (Fpath.t -> 'a) -> 'a
+val with_tmpdir : job:Job.t -> ?prefix:string -> (Fpath.t -> 'a) -> 'a
+(** [with_tmpdir ~job ?prefix fn] creates a temporary directory under
+    {!Filename.get_temp_dir_name}, runs [fn] with its path, and removes it
+    on return. The directory is created and removed via [Eio.Path] using
+    the [fs] capability on [job]. *)

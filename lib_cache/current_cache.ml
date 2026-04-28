@@ -125,8 +125,8 @@ module Generic(Op : S.GENERIC) = struct
 
        The first time a key is used, a new instance is created in the Retry state.
        Whenever an instance is wanted and we are in Retry, we transition to Active
-       and start the Lwt builder process. The only way to leave Active is by the
-       Lwt process finishing.
+       and start the builder fiber. The only way to leave Active is by that
+       fiber finishing.
 
        While Active, we may flag that the value we are setting is out-of-date,
        that the user wants to cancel, or that we should cancel because the build
@@ -182,23 +182,9 @@ module Generic(Op : S.GENERIC) = struct
       Current_incr.change t.notify () ~eq:(fun _ _ -> false);
       Current.Engine.update ()
 
-    (* Spawn a switch as a child of [parent_sw]. The new switch lives until
-       [release_r] is resolved; even after that, [Switch.run] still waits
-       for any child fibers before closing. Returns the switch and the
-       resolver that closes it.
-
-       Building block for per-slot switches (parent = engine sw) and
-       per-timer sub-switches (parent = slot_sw). *)
-    let spawn_managed_switch ~parent_sw =
-      let sw_p, sw_r = Eio.Promise.create () in
-      let release_p, release_r = Eio.Promise.create () in
-      Eio.Fiber.fork_daemon ~sw:parent_sw (fun () ->
-        Eio.Switch.run (fun sw ->
-          Eio.Promise.resolve sw_r sw;
-          Eio.Promise.await release_p);
-        `Stop_daemon);
-      Eio.Promise.await sw_p, release_r
-
+    (* Per-slot and per-timer sub-switches use the same shape — see
+       {!Current.Switch_ext}. *)
+    let spawn_managed_switch = Current.Switch_ext.spawn_managed
     let spawn_slot_switch ~caps = spawn_managed_switch ~parent_sw:caps.sw
 
     (* If [t] isn't in (or moving to) the desired state, start a thread to do that,
