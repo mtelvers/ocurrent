@@ -66,10 +66,7 @@ let main config mode =
     Current.Engine.create ~sw ~env ~config (fun engine ->
       let caps = Current_cache.caps_of_engine engine in
       let git = Current_git.create ~caps in
-      let module Docker = Current_docker.Default () (struct
-        let caps = caps
-        let git = git
-      end) in
+      let module Docker = (val Current_docker.default ~caps ~git) in
       let module Test = Make_test (Docker) in
       let module Test_cache = Current_cache.Make (Test) in
       let test_cache = Test_cache.create ~caps in

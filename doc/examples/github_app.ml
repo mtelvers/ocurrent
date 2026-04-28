@@ -65,10 +65,7 @@ let main config mode app_config =
     Current.Engine.create ~sw ~env ~config (fun engine ->
       let caps = Current_cache.caps_of_engine engine in
       let git = Current_git.create ~caps in
-      let module Docker = Current_docker.Default () (struct
-        let caps = caps
-        let git = git
-      end) in
+      let module Docker = (val Current_docker.default ~caps ~git) in
       let app = Current_github.App.create ~caps ~net app_config in
       Eio.Promise.resolve app_r app;
       let dockerfile =

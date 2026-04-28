@@ -62,10 +62,7 @@ let main config mode repo =
     Current.Engine.create ~sw ~env ~config (fun engine ->
       let caps = Current_cache.caps_of_engine engine in
       let git = Current_git.create ~caps in
-      let module Docker = Current_docker.Default () (struct
-        let caps = caps
-        let git = git
-      end) in
+      let module Docker = (val Current_docker.default ~caps ~git) in
       pipeline (module Docker) ~repo ())
   in
   let site = Current_web.Site.(v ~has_role:allow_all) ~name:program_name (Current_web.routes engine) in

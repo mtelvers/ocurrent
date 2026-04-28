@@ -31,10 +31,7 @@ let main config mode repo auth_config =
     Current.Engine.create ~sw ~env ~config (fun engine ->
       let caps = Current_cache.caps_of_engine engine in
       let git = Current_git.create ~caps in
-      let module Docker = Current_docker.Default () (struct
-        let caps = caps
-        let git = git
-      end) in
+      let module Docker = (val Current_docker.default ~caps ~git) in
       (* Run "docker build" on the latest commit in Git repository [repo]. *)
       let src = Git.Local.head_commit repo in
       let image = Docker.build ~pull ~timeout (`Git src) in

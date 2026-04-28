@@ -29,10 +29,7 @@ let main config mode service repo =
     Current.Engine.create ~sw ~env ~config (fun engine ->
       let caps = Current_cache.caps_of_engine engine in
       let git = Current_git.create ~caps in
-      let module Docker = Current_docker.Default () (struct
-        let caps = caps
-        let git = git
-      end) in
+      let module Docker = (val Current_docker.default ~caps ~git) in
       (* Run "docker build" on the latest commit in Git repository [repo]
          at least once a week, and redeploy [service] on changes. *)
       let src = Git.Local.head_commit repo in

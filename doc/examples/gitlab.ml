@@ -52,10 +52,7 @@ let main config mode gitlab_config repo =
     Current.Engine.create ~sw ~env ~config (fun engine ->
       let caps = Current_cache.caps_of_engine engine in
       let git = Current_git.create ~caps in
-      let module Docker = Current_docker.Default () (struct
-        let caps = caps
-        let git = git
-      end) in
+      let module Docker = (val Current_docker.default ~caps ~git) in
       let gitlab = Gitlab.Api.create ~caps ~net gitlab_config in
       Eio.Promise.resolve gitlab_r gitlab;
       let dockerfile =
