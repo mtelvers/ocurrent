@@ -3,23 +3,24 @@ open Astring
 
 let sep = "@@LOG@@"
 
-let max_log_chunk_size = 102400L  (* 100K at a time *)
+let max_log_chunk_size = 102400  (* 100K at a time *)
 
-(* Each web request that reads a log chunk runs the open / seek / read
-   on a sys-thread so the Eio scheduler isn't blocked while the kernel
-   is doing the disk read. *)
-let read ~start path =
-  Eio_unix.run_in_systhread @@ fun () ->
-  let ch = open_in_bin (Fpath.to_string path) in
-  Fun.protect ~finally:(fun () -> close_in ch) @@ fun () ->
-  let len = LargeFile.in_channel_length ch in
+(* Read up to [max_log_chunk_size] bytes of [path] starting at byte
+   offset [start]. Negative [start] is treated as an offset from the end
+   of the file. Returns the bytes read and the next offset. *)
+let read ~fs ~start path =
+  Eio.Path.with_open_in Eio.Path.(fs / Fpath.to_string path) @@ fun flow ->
+  let len = Eio.File.size flow |> Optint.Int63.to_int64 in
   let (+) = Int64.add in
   let (-) = Int64.sub in
   let start = if start < 0L then len + start else start in
   let start = if start < 0L then 0L else if start > len then len else start in
-  LargeFile.seek_in ch start;
-  let len = min max_log_chunk_size (len - start) in
-  really_input_string ch (Int64.to_int len), start + len
+  let want = Int64.to_int (min (Int64.of_int max_log_chunk_size) (len - start)) in
+  if want = 0 then ("", start)
+  else
+    let buf = Cstruct.create want in
+    let got = Eio.File.pread flow ~file_offset:(Optint.Int63.of_int64 start) [buf] in
+    Cstruct.to_string ~len:got buf, start + Int64.of_int got
 
 (* Streaming source for a job log response: first the template
    header, then the log itself (waiting for more data if the job is
@@ -31,6 +32,7 @@ module Log_source = struct
     mutable pre_offset : int;
     post : string;
     mutable post_offset : int;
+    fs : Eio.Fs.dir_ty Eio.Path.t;
     path : Fpath.t;
     job_id : string;
     ansi : Ansi.t;
@@ -63,7 +65,7 @@ module Log_source = struct
         t.pending_offset <- t.pending_offset + len;
         len
       ) else (
-        match read ~start:t.log_offset t.path with
+        match read ~fs:t.fs ~start:t.log_offset t.path with
         | "", _ ->
           (match Current.Job.lookup_running t.job_id with
            | None -> t.phase <- `Post; single_read t dst
@@ -88,11 +90,11 @@ module Log_source = struct
 
   let read_methods = []
 
-  let create ~pre ~post ~path ~job_id ~ansi =
+  let create ~fs ~pre ~post ~path ~job_id ~ansi =
     let state = {
       pre; pre_offset = 0;
       post; post_offset = 0;
-      path; job_id; ansi;
+      fs; path; job_id; ansi;
       log_offset = 0L;
       pending = ""; pending_offset = 0;
       phase = `Pre;
@@ -178,7 +180,8 @@ let log_body_source ctx ~engine ~actions ~job_id ~log:path =
   match String.cut ~sep tmpl with
   | None -> assert false
   | Some (pre, post) ->
-    Log_source.create ~pre ~post ~path ~job_id ~ansi
+    let fs = Current.Engine.fs engine in
+    Log_source.create ~fs ~pre ~post ~path ~job_id ~ansi
 
 type actions = <
   rebuild : (unit -> string) option;

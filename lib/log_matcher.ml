@@ -123,6 +123,15 @@ let analyse_string ?job log_text =
     job |> Option.iter (fun job -> Job.log job "%s" report);
     Some report
 
+(* analyse_file runs from inside the cache's failure-recording critical
+   section in [Current_cache.Generic.Instance.run] — between [Op.run]
+   returning Error and the cache committing the outcome to the DB and
+   flipping [t.op] to [`Finished]. Yielding here would let the engine
+   trace fire while the cache slot is still [`Active], which test
+   suites rely on not happening. So this stays on synchronous Unix I/O
+   rather than [Eio.Path]: one quick [open_in_bin] / [really_input_string]
+   is far cheaper than the cost of restructuring the cache critical
+   section to be yield-tolerant. *)
 let analyse_file ?job log_path =
   let ch = open_in_bin (Fpath.to_string log_path) in
   (* re doesn't support streaming, so load the whole log at once. *)

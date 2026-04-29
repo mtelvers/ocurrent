@@ -24,28 +24,22 @@ let dump_groups f groups =
     done
   )
 
-let test_pattern pattern =
+let max_log_bytes = 100 * 1024 * 1024
+
+let test_pattern ~fs pattern =
   let re = Re.Pcre.re pattern |> Re.compile in
   let recent_jobs = Lazy.force get_recent_jobs in
   let jobs = Current.Db.query recent_jobs Sqlite3.Data.[ INT 10000L ] in
   let n_jobs = List.length jobs in
-  let i = ref 0 in
   let results =
     List.filter_map (function
       | Sqlite3.Data.[ TEXT job_id ] ->
-        if !i = 0 then (
-          i := 100;
-          Eio.Fiber.yield ()
-        ) else (
-          decr i
-        );
         begin match Current.Job.log_path job_id with
           | Ok path ->
             let log_data =
-              let ch = open_in_bin (Fpath.to_string path) in
-              Fun.protect
-                (fun () -> really_input_string ch (in_channel_length ch))
-                ~finally:(fun () -> close_in ch)
+              Eio.Path.with_open_in Eio.Path.(fs / Fpath.to_string path)
+              @@ fun flow ->
+              Eio.Buf_read.(of_flow ~max_size:max_log_bytes flow |> take_all)
             in
             Re.exec_opt re log_data |> Option.map (fun g ->
                 let text = Fmt.str "@[<v>%a@]" dump_groups (Re.Group.all g) in
@@ -107,7 +101,7 @@ let csv_hints =
   [p [ txt "CSV files use the header "; code [txt "pattern,report,score"]; txt "."];
    p [ txt "New rules with existing "; code [txt "pattern"]; txt " override previous definition."]]
 
-let render ?msg ?test ?(pattern="") ?(report="") ?(score="") ctx =
+let render ~fs ?msg ?test ?(pattern="") ?(report="") ?(score="") ctx =
   let rules = LM.list_rules () in
   let message = match msg with
     | None -> []
@@ -116,7 +110,7 @@ let render ?msg ?test ?(pattern="") ?(report="") ?(score="") ctx =
   let test_results =
     match test with
     | None -> []
-    | Some p -> test_pattern p
+    | Some p -> test_pattern ~fs p
   in
   let csrf = Context.csrf ctx in
   Context.respond_ok ctx (message @ [
@@ -163,7 +157,7 @@ let validate_rule pattern report score =
  | _ ->
    Error "Bad form submission"
 
-let handle_post ctx data =
+let handle_post ~fs ctx data =
   let pattern = List.assoc_opt "pattern" data |> Option.value ~default:[] in
   let report = List.assoc_opt "report" data |> Option.value ~default:[] in
   let score = List.assoc_opt "score" data |> Option.value ~default:[] in
@@ -172,14 +166,14 @@ let handle_post ctx data =
     | [""] -> Server.respond_error ~body:"Pattern can't be empty" ()
     | [pattern] ->
         begin match LM.remove_rule pattern with
-          | Ok () -> render ctx ~msg:"Rule removed"
-          | Error `Rule_not_found -> render ctx ~msg:"Rule not found" ~pattern
+          | Ok () -> render ~fs ctx ~msg:"Rule removed"
+          | Error `Rule_not_found -> render ~fs ctx ~msg:"Rule not found" ~pattern
         end
     | _ ->
       Server.respond_error ~body:"Bad form submission" ()
   ) else if List.mem_assoc "add" data then (
     match validate_rule pattern report score with
-    | Ok rule -> LM.add_rule rule; render ctx ~msg:"Rule added"
+    | Ok rule -> LM.add_rule rule; render ~fs ctx ~msg:"Rule added"
     | Error body -> Server.respond_error ~body ()
   ) else if List.mem_assoc "test" data then (
     match pattern, report, score with
@@ -187,14 +181,14 @@ let handle_post ctx data =
     | [pattern], [report], [score] ->
       begin match Re.Pcre.re pattern with
         | exception _ -> Server.respond_error ~body:"Invalid PCRE-format pattern" ()
-        | _ -> render ctx ~test:pattern ~pattern ~report ~score
+        | _ -> render ~fs ctx ~test:pattern ~pattern ~report ~score
       end
     | _ -> Context.respond_error ctx `Bad_request "Bad form submission"
   ) else (
     Context.respond_error ctx `Bad_request "Bad form submission"
   )
 
-let handle_post_multipart ctx elts =
+let handle_post_multipart ~fs ctx elts =
   let import = List.find_all (fun {Multipart_form.header; _} ->
                    match Multipart_form.Header.content_disposition header with
                    | Some header -> Multipart_form.Content_disposition.name header = Some "import"
@@ -219,7 +213,7 @@ let handle_post_multipart ctx elts =
             Server.respond_error ~body:(Fmt.str "Rule at line %d, field %d: %s" nrecord nfield msg) ()
           | _, rules, [] ->
             List.iter LM.add_rule rules;
-            render ctx ~msg:"Rules added"
+            render ~fs ctx ~msg:"Rules added"
           | _, _, errors ->
             Server.respond_error ~body:(String.concat "\n" (List.rev errors)) ()
         end
@@ -227,22 +221,24 @@ let handle_post_multipart ctx elts =
     end
   | _ -> Context.respond_error ctx `Bad_request "Bad form submission"
 
-let r = object
-  inherit Resource.t
+let r ~engine =
+  let fs = Current.Engine.fs engine in
+  object
+    inherit Resource.t
 
-  val! can_get = `Viewer
+    val! can_get = `Viewer
 
-  method! private get ctx = render ctx
+    method! private get ctx = render ~fs ctx
 
-  method! private post ctx body =
-    let data = Uri.query_of_encoded body in
-    handle_post ctx data
+    method! private post ctx body =
+      let data = Uri.query_of_encoded body in
+      handle_post ~fs ctx data
 
-  method! private post_multipart ctx elts =
-    handle_post_multipart ctx elts
+    method! private post_multipart ctx elts =
+      handle_post_multipart ~fs ctx elts
 
-  method! nav_link = Some "Log analysis"
-end
+    method! nav_link = Some "Log analysis"
+  end
 
 let rules_csv = object
   inherit Resource.t

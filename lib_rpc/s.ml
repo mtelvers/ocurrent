@@ -95,6 +95,10 @@ module type CURRENT = sig
 
     val pipeline : t -> unit term
     (** [pipeline t] returns the current pipeline term. *)
+
+    val fs : t -> Eio.Fs.dir_ty Eio.Path.t
+    (** The [fs] capability the engine was built with — used by
+        log-streaming RPC methods to read job log files. *)
   end
 end
 

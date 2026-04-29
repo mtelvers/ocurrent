@@ -772,6 +772,11 @@ let () =
   Mock_current.Job.log_dir := "/tmp/current-rpc-test-logs";
   let _ = Bos.OS.Dir.create (Fpath.v !Mock_current.Job.log_dir) in
 
+  (* Engine.fs is now part of S.CURRENT (used by log-streaming RPC).
+     We need a real Eio.Path.t for the mock; spin up Eio_main here. *)
+  Eio_main.run @@ fun env ->
+  Mock_current.Engine.set_fs (Eio.Stdenv.fs env);
+
   Alcotest.run "current_rpc" [
     "types", type_tests;
     "engine", engine_tests;

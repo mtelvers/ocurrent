@@ -1,16 +1,18 @@
-let max_log_chunk_size = 102400L  (* 100K at a time *)
+let max_log_chunk_size = 102400  (* 100K at a time *)
 
-let read ~start path =
-  let ch = open_in_bin (Fpath.to_string path) in
-  Fun.protect ~finally:(fun () -> close_in ch) @@ fun () ->
-  let len = LargeFile.in_channel_length ch in
+let read ~fs ~start path =
+  Eio.Path.with_open_in Eio.Path.(fs / Fpath.to_string path) @@ fun flow ->
+  let len = Eio.File.size flow |> Optint.Int63.to_int64 in
   let (+) = Int64.add in
   let (-) = Int64.sub in
   let start = if start < 0L then len + start else start in
   let start = if start < 0L then 0L else if start > len then len else start in
-  LargeFile.seek_in ch start;
-  let len = min max_log_chunk_size (len - start) in
-  really_input_string ch (Int64.to_int len), start + len
+  let want = Int64.to_int (min (Int64.of_int max_log_chunk_size) (len - start)) in
+  if want = 0 then ("", start)
+  else
+    let buf = Cstruct.create want in
+    let got = Eio.File.pread flow ~file_offset:(Optint.Int63.of_int64 start) [buf] in
+    Cstruct.to_string ~len:got buf, start + Int64.of_int got
 
 (** Functor that takes both Current and Db modules.
     Used internally and for testing with mock databases. *)
@@ -39,12 +41,12 @@ module Make_with_db (Current : S.CURRENT) (Db : S.DB) = struct
   module Job = struct
     let job_cache = ref Current.Job.Map.empty
 
-    let stream_log_data ~job_id ~start =
+    let stream_log_data ~fs ~job_id ~start =
       match Current.Job.log_path job_id with
       | Error `Msg m -> Error (`Capnp (`Exception (Capnp_rpc.Exception.v m)))
       | Ok path ->
         let rec aux () =
-          match read ~start path with
+          match read ~fs ~start path with
           | ("", _) as x ->
             begin match Current.Job.lookup_running job_id with
               | None -> Ok x
@@ -63,6 +65,7 @@ module Make_with_db (Current : S.CURRENT) (Db : S.DB) = struct
         Capability.inc_ref job;
         job
       | None ->
+        let fs = Current.Engine.fs engine in
         let cap =
           let lookup () =
             let state = Current.Engine.state engine in
@@ -76,7 +79,7 @@ module Make_with_db (Current : S.CURRENT) (Db : S.DB) = struct
               release_param_caps ();
               let start = Params.start_get params in
               Log.info (fun f -> f "log(%S, %Ld)" job_id start);
-              match stream_log_data ~job_id ~start with
+              match stream_log_data ~fs ~job_id ~start with
               | Error (`Capnp (`Exception ex)) -> Service.error (`Exception ex)
               | Error (`Capnp _) -> Service.fail "Log streaming failed"
               | Ok (log, next) ->

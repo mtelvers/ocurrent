@@ -119,8 +119,10 @@ let test env ?config ?clock ?final_stats ~name v_fn actions =
         3. publish-fork resumes, Switch.run job_sw waits for the child notify-on-start;
         4. notify-on-start runs [notify t] → [Engine.update ()] increments the signal counter;
         5. the bridge fiber wakes from its [Cond.await] and resolves [next].
-       Five scheduler ticks. *)
-    wait 5
+       Plus, for tests that exercise [analyse_job] on a failing build,
+       [Eio.Path.with_open_in] adds one or two more yield points before the
+       cache records the failure. Seven ticks covers both cases. *)
+    wait 7
   in
   try
     Eio.Switch.run (fun sw ->

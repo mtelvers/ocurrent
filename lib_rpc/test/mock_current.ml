@@ -152,6 +152,16 @@ module Engine = struct
 
   let pipeline (t : t) = t.pipeline
 
+  (* Tests run inside [Eio_main.run]; grab the [fs] capability lazily so
+     [create] can stay synchronous and unit-arg. The test setup writes a
+     log file via this same path. *)
+  let fs_ref : Eio.Fs.dir_ty Eio.Path.t option ref = ref None
+  let set_fs fs = fs_ref := Some fs
+  let fs (_ : t) =
+    match !fs_ref with
+    | Some fs -> fs
+    | None -> failwith "Mock_current.Engine.fs: set_fs not called"
+
   let set_value (t : t) (value : unit output) = t.value <- value
   let set_pipeline (t : t) (p : unit term) = t.pipeline <- p
 

@@ -96,6 +96,10 @@ module Demo_current = struct
     let config (t : t) = t.config
     let pipeline (_ : t) = { _term_value = Error (`Active `Running) }
 
+    (* Demo doesn't actually stream logs — never called. *)
+    let fs (_ : t) : Eio.Fs.dir_ty Eio.Path.t =
+      failwith "rpc_demo: log streaming not implemented"
+
     let add_job id rebuild_fn =
       let actions = object
         method pp fmt = Fmt.pf fmt "Demo job: %s" id
