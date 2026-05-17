@@ -27,7 +27,7 @@ let main config mode host args =
       pipeline ~ssh ~host ~args ())
   in
   let site = Current_web.Site.(v ~has_role:allow_all) ~name:program_name (Current_web.routes engine) in
-  Current_web.run ~net ~mode site
+  Current_web.run ~net ~mode site ()
 
 (* Command-line parsing *)
 
@@ -52,6 +52,6 @@ let args =
 let cmd =
   let doc = "Run an SSH command every 30 minutes." in
   let info = Cmd.info program_name ~doc in
-  Cmd.v info Term.(term_result (const main $ Current.Config.cmdliner $ Current_web.cmdliner $ host $ args))
+  Cmd.v info Term.(const main $ Current.Config.cmdliner $ Current_web.cmdliner $ host $ args)
 
 let () = exit @@ Cmd.eval cmd

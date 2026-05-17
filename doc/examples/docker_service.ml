@@ -37,7 +37,7 @@ let main config mode service repo =
       Docker.service ~name:service ~image ())
   in
   let site = Current_web.Site.(v ~has_role:allow_all) ~name:program_name (Current_web.routes engine) in
-  Current_web.run ~net ~mode site
+  Current_web.run ~net ~mode site ()
 
 (* Command-line parsing *)
 
@@ -62,6 +62,6 @@ let repo =
 let cmd =
   let doc = "Keep a Docker SwarmKit service up-to-date." in
   let info = Cmd.info program_name ~doc in
-  Cmd.v info Term.(term_result (const main $ Current.Config.cmdliner $ Current_web.cmdliner $ service $ repo))
+  Cmd.v info Term.(const main $ Current.Config.cmdliner $ Current_web.cmdliner $ service $ repo)
 
 let () = exit @@ Cmd.eval cmd

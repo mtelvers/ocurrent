@@ -88,7 +88,7 @@ let main config mode =
       test (Docker.build ~pull:false ~dockerfile `No_context))
   in
   let site = Current_web.Site.(v ~has_role:allow_all) ~name:program_name (Current_web.routes engine) in
-  Current_web.run ~net ~mode site
+  Current_web.run ~net ~mode site ()
 
 (* Command-line parsing *)
 
@@ -97,6 +97,6 @@ open Cmdliner
 let cmd =
   let doc = "Check that the nginx container can serve a web page" in
   let info = Cmd.info program_name ~doc in
-  Cmd.v info Term.(term_result (const main $ Current.Config.cmdliner $ Current_web.cmdliner))
+  Cmd.v info Term.(const main $ Current.Config.cmdliner $ Current_web.cmdliner)
 
 let () = exit @@ Cmd.eval cmd

@@ -93,7 +93,7 @@ let ipaddr_of_host = function
        Eio_unix.Net.Ipaddr.of_unix addr
      | _ :: _ -> Fmt.failwith "No IPv4 address for host %S" host)
 
-let run ~net ?(mode=default_mode) site =
+let run ~net ?(mode=default_mode) site () =
   let callback = handle_request ~site in
   let server = Utils.Server.make ~callback () in
   Log.info (fun f -> f "Starting web server: %a" pp_mode mode);

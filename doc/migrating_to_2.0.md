@@ -116,26 +116,27 @@ let main () config mode prometheus_config =
       pipeline …)
   in
   let site = Current_web.Site.v ~has_role ~name:"…" routes in
-  Prometheus_unix.serve ~sw ~net prometheus_config;
-  Current_web.run ~net ~mode site
+  Eio.Fiber.all
+    (Current_web.run ~net ~mode site :: Prometheus_unix.serve ~net prometheus_config)
 ```
 
 The order matters:
 
 - `Eio_main.run` is at the top.
-- `Eio.Switch.run` opens the switch the engine and web server live on.
+- `Eio.Switch.run` opens the switch the engine lives on.
 - `Current.Engine.create ~sw ~env` takes the switch and Eio env
   explicitly. The factory thunk receives the new `Engine.t` so plugin
   instances built inside can call `Current_cache.caps_of_engine` to
   derive a `caps` record (used to instantiate caches — see *Plugin
   instance creation* below).
-- `Prometheus_unix.serve` returns immediately after forking the metrics
-  server onto `sw`. It's no longer a list of Lwt threads to compose
-  into `Lwt.choose`.
-- `Current_web.run ~net` is the blocking call. It returns when the web
-  server stops, and exiting `Switch.run` then tears down the engine
-  daemon and any Prometheus server. Note: it now takes `~net`
-  explicitly (was implicit via global state in pre-2.0 betas).
+- `Current_web.run` and `Prometheus_unix.serve` both return fiber
+  bodies (`unit -> unit` and `(unit -> unit) list` respectively) rather
+  than blocking. Compose them with `Eio.Fiber.all`. Each owns its
+  listening socket via an internal switch; cancelling a fiber shuts
+  that server down. Exiting `Eio.Fiber.all` then exits `Switch.run`,
+  which tears down the engine daemon.
+- `Current_web.run` now takes `~net` explicitly (was implicit via
+  global state in pre-2.0 betas).
 
 > **Note for early-2.0-beta users**: an earlier design had a global
 > `Current.Engine_env.init ~sw ~env` call that stashed capabilities for
@@ -310,8 +311,8 @@ fibers or spawn subprocesses scoped to the job.
 
 The engine runs as an Eio daemon on the switch passed to
 `Engine.create ~sw`. There is no thread to compose with `Lwt.choose`.
-Whatever you used to combine engine + web + prometheus becomes a flat
-sequence inside the same `Switch.run`:
+The web server and Prometheus server now return fiber bodies; compose
+them with `Eio.Fiber.all`:
 
 ```ocaml
 (* before *)
@@ -322,8 +323,8 @@ Lwt.choose [
 ]
 
 (* after *)
-Prometheus_unix.serve ~sw ~net config;
-Current_web.run ~net ~mode site
+Eio.Fiber.all
+  (Current_web.run ~net ~mode site :: Prometheus_unix.serve ~net config)
 ```
 
 ### `Lwt.finalize` → `Fun.protect`
@@ -378,7 +379,7 @@ Eio.Switch.run @@ fun sw ->
 let net = Eio.Stdenv.net env in
 let engine = Current.Engine.create ~sw ~env ~config (fun engine -> …) in
 …
-Current_web.run ~net ~mode site
+Current_web.run ~net ~mode site ()
 ```
 
 ### `dune` files

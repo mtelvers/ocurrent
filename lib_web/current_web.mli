@@ -143,10 +143,13 @@ type t =
   { host : string option;
     port : int }
 
-val run : net:_ Eio.Net.t -> ?mode:t -> Site.t -> 'a
-(** [run ~net ?mode site] runs a web server (with configuration [mode])
-    that handles incoming requests for [site]. Blocks the calling fiber
-    until the server stops; the listening socket is scoped to that
-    lifetime via an internal [Eio.Switch]. *)
+val run : net:_ Eio.Net.t -> ?mode:t -> Site.t -> unit -> unit
+(** [run ~net ?mode site] returns a fiber body that runs a web server
+    (with configuration [mode]) handling incoming requests for [site].
+
+    Compose it with your application work using {!Eio.Fiber.all} or
+    {!Eio.Fiber.fork}. The fiber owns its listening socket via an
+    internal switch; cancelling the fiber closes the socket and shuts
+    the server down. *)
 
 val cmdliner : t Cmdliner.Term.t

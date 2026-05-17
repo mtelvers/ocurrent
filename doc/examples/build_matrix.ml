@@ -66,7 +66,7 @@ let main config mode repo =
       pipeline (module Docker) ~repo ())
   in
   let site = Current_web.Site.(v ~has_role:allow_all) ~name:program_name (Current_web.routes engine) in
-  Current_web.run ~net ~mode site
+  Current_web.run ~net ~mode site ()
 
 (* Command-line parsing *)
 
@@ -83,6 +83,6 @@ let repo =
 let cmd =
   let doc = "Build the head commit of a local Git repository using Docker." in
   let info = Cmd.info program_name ~doc in
-  Cmd.v info Term.(term_result (const main $ Current.Config.cmdliner $ Current_web.cmdliner $ repo))
+  Cmd.v info Term.(const main $ Current.Config.cmdliner $ Current_web.cmdliner $ repo)
 
 let () = exit @@ Cmd.eval cmd

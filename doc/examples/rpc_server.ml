@@ -49,7 +49,7 @@ let main env config mode capnp repo =
   close_out ch;
   Logs.app (fun f -> f "Wrote capability reference to %S" cap_file);
   let site = Current_web.Site.(v ~has_role:allow_all) ~name:program_name (Current_web.routes engine) in
-  Current_web.run ~net ~mode site
+  Current_web.run ~net ~mode site ()
 
 (* Command-line parsing *)
 
@@ -70,7 +70,7 @@ let man = [
 let cmd eio_env =
   let doc = "A build server that can be controlled via Cap'n Proto RPC" in
   let info = Cmd.info program_name ~doc ~man in
-  Cmd.v info Term.(term_result (const (main eio_env) $ Current.Config.cmdliner $ Current_web.cmdliner $ Capnp_rpc_unix.Vat_config.cmd eio_env $ repo))
+  Cmd.v info Term.(const (main eio_env) $ Current.Config.cmdliner $ Current_web.cmdliner $ Capnp_rpc_unix.Vat_config.cmd eio_env $ repo)
 
 let () =
   Eio_main.run @@ fun eio_env ->
