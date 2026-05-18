@@ -148,8 +148,6 @@ let pp_time ppf t =
   Fmt.pf ppf "%04d-%02d-%02d %02d:%02d:%02d"
     (tm.tm_year + 1900) (tm.tm_mon + 1) tm.tm_mday tm.tm_hour tm.tm_min tm.tm_sec
 
-let () = Prometheus_unix.Logging.init ~default_level:Logs.Warning ()
-
 let show_error k =
   match k with
   | Error `Capnp e -> Fmt.pr "Error: %a@." Capnp_rpc.Error.pp e; None
@@ -264,5 +262,8 @@ let run () =
   Capnp_rpc.Capability.dec_ref service
 
 let () =
-  Eio_main.run @@ fun _env ->
+  Eio_main.run @@ fun env ->
+  let clock = Eio.Stdenv.clock env in
+  Prometheus_unix.Logging.init ~clock () ~default_level:Logs.Warning;
+  Prometheus_unix.init ~clock ();
   run ()

@@ -37,7 +37,13 @@
    $ rpc_client rebuild-all -c ./engine.cap job1 job2 job3
 *)
 
-let () = Prometheus_unix.Logging.init ~default_level:Logs.Warning ()
+(* This thin CLI dispatcher has no Eio_main.run of its own (subcommands handle
+   their own Eio runtime), so we use Logs directly rather than
+   Prometheus_unix.Logging.init, which now requires an Eio clock. *)
+let () =
+  Fmt_tty.setup_std_outputs ();
+  Logs.set_reporter (Logs_fmt.reporter ());
+  Logs.set_level (Some Logs.Warning)
 
 let () =
   let cmd = Current_rpc.Client.Cmdliner.cmd "rpc_client" "v2.0" in

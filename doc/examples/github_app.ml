@@ -22,8 +22,6 @@ module Github = Current_github
 (* Limit to one build at a time. *)
 let pool = Current.Pool.create ~label:"docker" 1
 
-let () = Prometheus_unix.Logging.init ()
-
 (* Link for GitHub statuses. *)
 let url = Uri.of_string "http://localhost:8080"
 
@@ -59,6 +57,9 @@ let main config mode app_config =
   Eio_main.run @@ fun env ->
   Eio.Switch.run @@ fun sw ->
   let net = Eio.Stdenv.net env in
+  let clock = Eio.Stdenv.clock env in
+  Prometheus_unix.Logging.init ~clock ();
+  Prometheus_unix.init ~clock ();
   let has_role = Current_web.Site.allow_all in
   let app_p, app_r = Eio.Promise.create () in
   let engine =

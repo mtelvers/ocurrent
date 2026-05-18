@@ -10,8 +10,6 @@
 
 let program_name = "current_ssh"
 
-let () = Prometheus_unix.Logging.init ()
-
 let pipeline ~ssh ~host ~args () =
   let halfhourly = Current_cache.Schedule.v ~valid_for:(Duration.of_min 30) () in
   let ssh = Current_ssh.run ssh ~schedule:halfhourly host ~key:("my-cmd") (Current.return args) in
@@ -21,6 +19,9 @@ let main config mode host args =
   Eio_main.run @@ fun env ->
   Eio.Switch.run @@ fun sw ->
   let net = Eio.Stdenv.net env in
+  let clock = Eio.Stdenv.clock env in
+  Prometheus_unix.Logging.init ~clock ();
+  Prometheus_unix.init ~clock ();
   let engine =
     Current.Engine.create ~sw ~env ~config (fun engine ->
       let ssh = Current_ssh.create ~caps:(Current_cache.caps_of_engine engine) in

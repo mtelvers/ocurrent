@@ -12,8 +12,6 @@ open Current.Syntax
 
 let weekly = Current_cache.Schedule.v ~valid_for:(Duration.of_day 7) ()
 
-let () = Prometheus_unix.Logging.init ()
-
 (* The test command to run. You might want to make this part of the key if it
    should be configurable. *)
 let test_command = ["curl"; "-Ss"; "--fail"; "http://localhost/"]
@@ -62,6 +60,9 @@ let main config mode =
   Eio_main.run @@ fun env ->
   Eio.Switch.run @@ fun sw ->
   let net = Eio.Stdenv.net env in
+  let clock = Eio.Stdenv.clock env in
+  Prometheus_unix.Logging.init ~clock ();
+  Prometheus_unix.init ~clock ();
   let engine =
     Current.Engine.create ~sw ~env ~config (fun engine ->
       let caps = Current_cache.caps_of_engine engine in

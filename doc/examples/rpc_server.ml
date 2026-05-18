@@ -15,8 +15,6 @@ let program_name = "rpc_server"
 module Git = Current_git
 module Rpc = Current_rpc.Impl(Current)
 
-let () = Prometheus_unix.Logging.init ()
-
 (* Where we write the connection details containing the connection address and
    authorisation token. *)
 let cap_file = "engine.cap"
@@ -28,7 +26,10 @@ let timeout = Duration.of_min 50    (* Max build time *)
 let main env config mode capnp repo =
   Eio.Switch.run @@ fun sw ->
   let net = Eio.Stdenv.net env in
+  let clock = Eio.Stdenv.clock env in
   let process_mgr = Eio.Stdenv.process_mgr env in
+  Prometheus_unix.Logging.init ~clock ();
+  Prometheus_unix.init ~clock ();
   let repo = Git.Local.v ~sw ~process_mgr (Fpath.v repo) in
   let engine =
     Current.Engine.create ~sw ~env ~config (fun engine ->

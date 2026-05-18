@@ -6,8 +6,6 @@ let pull = false    (* Whether to check for updates using "docker build --pull" 
 
 let timeout = Duration.of_min 50    (* Max build time *)
 
-let () = Prometheus_unix.Logging.init ()
-
 (* included in doc/example_pipelines.md as code snippet *)
 [@@@part "pipeline"]
 (* Run "docker build" on the latest commit in Git repository [repo]. *)
@@ -29,7 +27,10 @@ let main config mode repo =
   Eio_main.run @@ fun env ->
   Eio.Switch.run @@ fun sw ->
   let net = Eio.Stdenv.net env in
+  let clock = Eio.Stdenv.clock env in
   let process_mgr = Eio.Stdenv.process_mgr env in
+  Prometheus_unix.Logging.init ~clock ();
+  Prometheus_unix.init ~clock ();
   let repo = find_git_root ~process_mgr repo in
   let repo = Git.Local.v ~sw ~process_mgr (Fpath.v repo) in
   let engine =

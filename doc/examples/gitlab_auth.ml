@@ -8,8 +8,6 @@ module Git = Current_git
 let pull = false
 let timeout = Duration.of_min 50
 
-let () = Prometheus_unix.Logging.init ()
-
 (* Access control policy. *)
 let has_role user role =
   match user with
@@ -24,7 +22,10 @@ let main config mode repo auth_config =
   Eio_main.run @@ fun env ->
   Eio.Switch.run @@ fun sw ->
   let net = Eio.Stdenv.net env in
+  let clock = Eio.Stdenv.clock env in
   let process_mgr = Eio.Stdenv.process_mgr env in
+  Prometheus_unix.Logging.init ~clock ();
+  Prometheus_unix.init ~clock ();
   let auth = Option.map (Current_gitlab.Auth.create ~net) auth_config in
   let repo = Git.Local.v ~sw ~process_mgr (Fpath.v repo) in
   let engine =
