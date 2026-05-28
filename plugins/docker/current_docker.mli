@@ -26,12 +26,13 @@ module Raw : sig
     schedule:Current_cache.Schedule.t ->
     ?auth:(string * string) ->
     ?server:string ->
-    ?arch:string -> string -> Image.t Current.Primitive.t
+    ?arch:string -> ?os:string -> string -> Image.t Current.Primitive.t
 
   val peek :
     docker_context:string option ->
     schedule:Current_cache.Schedule.t ->
-    arch:string -> string -> S.repo_id Current.Primitive.t
+    arch:string -> ?os:string -> string -> S.repo_id Current.Primitive.t
+  (** [os] defaults to ["linux"]. *)
 
   val build :
     docker_context:string option ->

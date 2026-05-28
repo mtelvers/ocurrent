@@ -12,6 +12,7 @@ module Key = struct
   type t = {
     docker_context : string option;
     arch: string option;
+    os: string option;
     tag : string;
   } [@@deriving to_yojson]
 
@@ -22,7 +23,7 @@ end
 
 module Value = Image
 
-let get_digest_from_manifest manifest arch =
+let get_digest_from_manifest manifest ~arch ~os =
   let open Yojson.Basic.Util in
   match Yojson.Basic.from_string manifest with
   | exception ex -> Fmt.error_msg "Failed to parse manifest JSON: %a@\n%S" Fmt.exn ex manifest
@@ -31,17 +32,17 @@ let get_digest_from_manifest manifest arch =
       json |> member "manifests" |> to_list |>
       List.find (fun j -> member "platform" j |> fun j ->
                           (member "architecture" j |> to_string = arch) &&
-                          (member "os" j |> to_string = "linux")) |>
+                          (member "os" j |> to_string = os)) |>
       member "digest" |> fun digest -> Ok (to_string digest)
     with ex ->
-      Fmt.error_msg "Failed to find arch %S in manifest (%a):@,%a"
-        arch
+      Fmt.error_msg "Failed to find arch %S os %S in manifest (%a):@,%a"
+        arch os
         Fmt.exn ex
         (Yojson.Basic.pretty_print ~std:true) json
 
 let build auth job key =
   Current.Job.start job ~level:Current.Level.Mostly_harmless >>= fun () ->
-  let { Key.docker_context; tag; arch } = key in
+  let { Key.docker_context; tag; arch; os } = key in
   Auth.login ~docker_context ~job auth >>!= (fun () ->
   Prometheus.Gauge.inc_one Metrics.docker_pull_events;
   match arch with
@@ -56,7 +57,8 @@ let build auth job key =
   | Some arch -> begin
       let cmd = Cmd.docker ~docker_context ["manifest"; "inspect"; tag ] in
       Current.Process.check_output ~cancellable:true ~job cmd >>!= fun manifest ->
-      match get_digest_from_manifest manifest arch with
+      let os = Option.value os ~default:"linux" in
+      match get_digest_from_manifest manifest ~arch ~os with
       | Error _ as e -> Lwt.return e
       | Ok hash ->
         let full_tag = tag ^ "@" ^ hash in
