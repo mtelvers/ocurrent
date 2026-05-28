@@ -134,8 +134,7 @@ module Make (Host : S.HOST) = struct
 
   let peek ?label ~arch ?(os="linux") ~schedule tag =
     let label = Option.value label ~default:tag in
-    let os_label = if os = "linux" then "" else "@," ^ os in
-    Current.component "peek %s@,%s%s" label arch os_label |>
+    Current.component "peek %s@,%s@,%s" label arch os |>
     let> () = Current.return () in
     Raw.peek ~docker_context ~schedule ~arch ~os tag
 
