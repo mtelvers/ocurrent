@@ -9,13 +9,13 @@ module Raw = struct
 
   module PullC = Current_cache.Make(Pull)
 
-  let pull ~docker_context ~schedule ?auth ?server ?arch tag =
-    PullC.get ~schedule (Auth.v ~auth ~server) { Pull.Key.docker_context; tag; arch }
+  let pull ~docker_context ~schedule ?auth ?server ?arch ?os tag =
+    PullC.get ~schedule (Auth.v ~auth ~server) { Pull.Key.docker_context; tag; arch; os }
 
   module PeekC = Current_cache.Make(Peek)
 
-  let peek ~docker_context ~schedule ~arch tag =
-    PeekC.get ~schedule Peek.No_context { Peek.Key.docker_context; tag; arch }
+  let peek ~docker_context ~schedule ~arch ?(os="linux") tag =
+    PeekC.get ~schedule Peek.No_context { Peek.Key.docker_context; tag; arch; os }
 
   module BC = Current_cache.Make(Build)
 
@@ -132,11 +132,11 @@ module Make (Host : S.HOST) = struct
     let> () = Current.return () in
     Raw.pull ~docker_context ~schedule ?arch ?auth ?server tag
 
-  let peek ?label ~arch ~schedule tag =
+  let peek ?label ~arch ?(os="linux") ~schedule tag =
     let label = Option.value label ~default:tag in
-    Current.component "peek %s@,%s" label arch |>
+    Current.component "peek %s@,%s@,%s" label arch os |>
     let> () = Current.return () in
-    Raw.peek ~docker_context ~schedule ~arch tag
+    Raw.peek ~docker_context ~schedule ~arch ~os tag
 
   let pp_sp_label = Fmt.(option (sp ++ string))
 

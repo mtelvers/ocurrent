@@ -35,10 +35,12 @@ module type DOCKER = sig
   val peek :
     ?label:string ->
     arch:string ->
+    ?os:string ->
     schedule:Current_cache.Schedule.t ->
     string -> repo_id Current.t
   (** [peek ~schedule ~arch tag] gets the latest version of [tag] without actually pulling it.
       @param arch Select a specific architecture from a multi-arch manifest.
+      @param os Select a specific OS from a multi-platform manifest (default ["linux"]).
       @param schedule Controls how often we check for updates. If the schedule
                       has no [valid_for] limit then we will only ever check once. *)
 

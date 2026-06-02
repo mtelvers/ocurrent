@@ -8,6 +8,7 @@ module Key = struct
   type t = {
     docker_context : string option;
     arch: string;
+    os: string;
     tag : string;
   } [@@deriving to_yojson]
 
@@ -22,10 +23,10 @@ let id = "docker-peek"
 
 let build No_context job key =
   Current.Job.start job ~level:Current.Level.Mostly_harmless >>= fun () ->
-  let { Key.docker_context = _; tag; arch } = key in
+  let { Key.docker_context = _; tag; arch; os } = key in
   Prometheus.Gauge.inc_one Metrics.docker_peek_events;
   Current.Process.check_output ~cancellable:true ~job (Key.cmd key) >>!= (fun manifest ->
-    match Pull.get_digest_from_manifest manifest arch with
+    match Pull.get_digest_from_manifest manifest ~arch ~os with
     | Error _ as e -> Lwt.return e
     | Ok hash ->
       Current.Job.log job "Got %S" hash;
