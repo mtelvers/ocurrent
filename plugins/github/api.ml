@@ -430,6 +430,57 @@ let get_token t =
 
 let ( / ) a b = Yojson.Safe.Util.member b a
 
+let http_timeout = 30.0
+
+(* Perform [meth] on [uri] over a connection we own, returning the response and
+   its body read into a string. The connection is closed on every exit path
+   and the body is always drained.
+
+   Avoid the [Cohttp_lwt_unix.Client.{get,post}] convenience functions.
+   They run on cohttp's no-cache path, whose request promise is created
+   with [Lwt.wait] and is therefore non-cancelable: wrapping them in
+   [Lwt.pick]/[Lwt_unix.with_timeout] (as the cohttp README suggests)
+   only bounds how long we wait -- it never tears the connection down. If
+   GitHub's edge goes silent mid-response the socket is then leaked
+   forever (ocaml-cohttp#790). By driving the low-level [Connection]
+   API ourselves we hold the connection handle and can [Connection.close]
+   the socket when the timeout fires.
+
+   Transient failures are retried with exponential backoff, up to [retry]
+   attempts in total. [Connection.Retry] (cohttp found the connection dead) is
+   always safe to retry -- cohttp guarantees the request never reached the
+   server. A [Lwt_unix.Timeout], however, may already have been processed
+   server-side, so a non-idempotent request whose duplication would matter
+   should pass [~retry:1] to disable retrying. *)
+let http_request ?(retry = 3) ?headers ?(body = `Empty) meth uri =
+  let ctx = Lazy.force Cohttp_lwt_unix.Net.default_ctx in
+  let once () =
+    Cohttp_lwt_unix.Net.resolve ~ctx uri >>= fun endp ->
+    Cohttp_lwt_unix.Connection.connect ~ctx ~persistent:false endp >>= fun conn ->
+    Lwt.finalize
+      (fun () ->
+         Lwt_unix.with_timeout http_timeout (fun () ->
+             Cohttp_lwt_unix.Connection.call conn ?headers ~body meth uri
+             >>= fun (resp, body) ->
+             Cohttp_lwt.Body.to_string body >|= fun body -> (resp, body)))
+      (fun () -> Cohttp_lwt_unix.Connection.close conn; Lwt.return_unit)
+  in
+  (* Retrying here (rather than per call site) also spreads a retried wave in
+     time, which helps when the failure was a connect-burst against GitHub's
+     edge. *)
+  let rec attempt n =
+    Lwt.catch once
+      (function
+        | (Lwt_unix.Timeout | Cohttp_lwt__Connection.Retry) as ex when n < retry ->
+            let delay = Float.pow 2.0 (float_of_int n) -. 1.0 in   (* 1s, 3s, ... *)
+            Log.warn (fun f -> f "Retrying %s %a in %.1fs (attempt %d/%d) after %a"
+                          (Http.Method.to_string meth) Uri.pp uri delay (n + 1) retry Fmt.exn ex);
+            Lwt_unix.sleep delay >>= fun () ->
+            attempt (n + 1)
+        | e -> Lwt.reraise e)
+  in
+  attempt 1
+
 let exec_graphql ?variables t query =
   let body =
     `Assoc (
@@ -445,9 +496,7 @@ let exec_graphql ?variables t query =
   | Error (`Msg m) -> failwith m
   | Ok token ->
     let headers = Cohttp.Header.init_with "Authorization" ("bearer " ^ token) in
-    Cohttp_lwt_unix.Client.post ~headers ~body graphql_endpoint >>=
-    fun (resp, body) ->
-    Cohttp_lwt.Body.to_string body >|= fun body ->
+    http_request ~headers ~body `POST graphql_endpoint >|= fun (resp, body) ->
     match Cohttp.Response.status resp with
     | `OK ->
       let json = Yojson.Safe.from_string body in
@@ -520,13 +569,14 @@ module Monitor (Query : GRAPHQL_QUERY) = struct
     let watch refresh =
       let owner_name = Printf.sprintf "%s/%s" repo.owner repo.name in
       let rec aux x =
-        Log.info (fun f -> f "Received webhook for owner/name: %s" owner_name);
         x >>= fun () ->
+        Log.info (fun f -> f "Received webhook for owner/name: %s (%s monitor)" owner_name Query.name);
         let x = await_event ~owner_name in
         refresh ();
         Lwt_unix.sleep 10.0 >>= fun () ->   (* Limit updates to 1 per 10 seconds *)
         aux x
       in
+      Log.info (fun f -> f "Watch starting for owner/name: %s (%s monitor)" owner_name Query.name);
       let x = await_event ~owner_name in
       let thread =
         Lwt.catch
@@ -923,10 +973,7 @@ module Commit = struct
           (Yojson.Safe.pretty_print ~std:true) body;
         let body = body |> Yojson.Safe.to_string |> Cohttp_lwt.Body.of_string in
         Lwt.try_bind
-          (fun () ->
-             Cohttp_lwt_unix.Client.post ~headers ~body uri >>= fun (resp, body) ->
-             Cohttp_lwt.Body.to_string body >|= fun body -> (resp, body)
-          )
+          (fun () -> http_request ~headers ~body `POST uri)
           (fun (resp, body) ->
              match Cohttp.Response.status resp with
              | `Created -> Lwt_result.return ()
@@ -1017,8 +1064,7 @@ module Anonymous = struct
 
   let query_head { Repo_id.owner; name } gref =
     let uri = ref_endpoint ~owner ~name gref in
-    Cohttp_lwt_unix.Client.get uri >>= fun (resp, body) ->
-    Cohttp_lwt.Body.to_string body >|= fun body ->
+    http_request `GET uri >|= fun (resp, body) ->
     match Cohttp.Response.status resp with
     | `OK | `Created ->
       let json = Yojson.Safe.from_string body in
