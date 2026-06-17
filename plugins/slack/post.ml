@@ -20,7 +20,10 @@ let publish t job _key message =
     |> Yojson.to_string
     |> Cohttp_lwt.Body.of_string
   in
-  Cohttp_lwt_unix.Client.post ~headers ~body t >>= fun (resp, _body) ->
+  Cohttp_lwt_unix.Client.post ~headers ~body t >>= fun (resp, body) ->
+  (* Drain the body so the connection is released (otherwise it lingers until
+     the GC finaliser reaps it -- see ocaml-cohttp#730). *)
+  Cohttp_lwt.Body.drain_body body >>= fun () ->
   match resp.Cohttp.Response.status with
   | `OK -> Lwt.return @@ Ok ()
   | err ->
