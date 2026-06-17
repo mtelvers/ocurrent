@@ -1,3 +1,13 @@
+### v0.7.5 (2026-06-17)
+
+Other:
+
+- Use `buildx imagetools create` in `push_manifest` (@mtelvers, #474)
+- Bound, retry and clean up GitHub HTTP requests; drain Slack response body (@mtelvers, #473)
+- Add `?os` to Docker `Peek` and `Pull` (default linux) and always show os in the component label (@mtelvers, #472)
+- Cap capnp-rpc dependencies at < 2.0 (@mtelvers, #471)
+- Add missing test dependencies to current\_rpc (@mtelvers, #470)
+
 ### v0.7.4 (2026-03-26)
 
 Other:
