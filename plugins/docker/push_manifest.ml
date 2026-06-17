@@ -33,35 +33,34 @@ module Outcome = struct
     | repo_id -> repo_id
 end
 
+(* [imagetools create] assembles and pushes in one step, and accepts index
+   source references (e.g. a single-platform image BuildKit wrapped with an
+   attestation), which [docker manifest create] rejects. *)
 let create_cmd ~config ~tag {Value.manifests} =
-  Cmd.docker ~config ~docker_context:None (["manifest"; "create"; tag] @ manifests)
+  Cmd.docker ~config ~docker_context:None
+    (["buildx"; "imagetools"; "create"; "-t"; tag] @ manifests)
 
-let push_cmd ~config tag =
-  Cmd.docker ~config ~docker_context:None ["manifest"; "push"; tag]
-
-let or_fail = function
-  | Ok x -> x
-  | Error (`Msg x) -> failwith x
+(* [create] doesn't report the pushed digest, so read it back. The [printf]
+   wrapper is required: buildx prints its default block for a bare
+   [{{.Manifest.Digest}}]. *)
+let inspect_cmd ~config ~tag =
+  Cmd.docker ~config ~docker_context:None
+    ["buildx"; "imagetools"; "inspect"; "--format"; {|{{printf "%s" .Manifest.Digest}}|}; tag]
 
 let publish auth job tag value =
   Current.Job.start job ~level:Current.Level.Dangerous >>= fun () ->
   Current.Process.with_tmpdir ~prefix:"push-manifest" @@ fun config ->
-  Bos.OS.File.write Fpath.(config / "config.json") {|{"experimental": "enabled"}|} |> or_fail;
+  (* [login] writes the credentials buildx reads from [config]. *)
   Auth.login ~config ~docker_context:None ~job auth >>!= fun () ->
   Prometheus.Gauge.inc_one Metrics.docker_push_manifest_events;
-  Current.Process.exec ~cancellable:true ~job (create_cmd ~config ~tag value) >>= (function
+  (* [create] performs the push, so serialise it. *)
+  (Lwt_mutex.with_lock push_mutex @@ fun () ->
+   Current.Process.exec ~cancellable:true ~job (create_cmd ~config ~tag value))
+  >>= (function
   | Error _ as e -> Lwt.return e
   | Ok () ->
-    Lwt_mutex.with_lock push_mutex @@ fun () ->
-    Current.Process.check_output ~cancellable:true ~job (push_cmd ~config tag) >>!= fun output ->
-    (* docker-manifest is still experimental and doesn't have a sensible output format yet. *)
-    Current.Job.write job output;
-    let output = String.trim output in
-    let hash =
-      match Astring.String.cut ~rev:true ~sep:"\n" output with
-      | None -> output
-      | Some (_, id) -> id
-    in
+    Current.Process.check_output ~cancellable:true ~job (inspect_cmd ~config ~tag) >>!= fun output ->
+    let hash = String.trim output in
     let repo_id = Printf.sprintf "%s@%s" tag hash in
     Current.Job.log job "--> %S" repo_id;
     Lwt_result.return repo_id)
