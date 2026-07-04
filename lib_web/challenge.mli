@@ -46,9 +46,11 @@ val handle :
   meth:Cohttp.Code.meth ->
   [ `Pass | `Response of (Cohttp.Response.t * Cohttp_lwt.Body.t) Lwt.t ]
 (** [handle t ~secure request ~path ~meth] is the gate.
-    It returns [`Response r] either to serve the interstitial (for an HTML page
-    request lacking a valid token) or to handle the verification endpoint;
-    otherwise [`Pass], meaning the request should be routed as normal. Only
+    It returns [`Response r] to serve the interstitial (for an HTML page request
+    lacking a valid token), to handle the verification endpoint, or to serve the
+    interstitial's own JS/CSS assets (so a bare server without static routes can
+    present a solvable challenge); otherwise [`Pass], meaning the request should
+    be routed as normal. Only
     [`GET] requests that either accept [text/html] or whose path matches the
     [protect] predicate are ever challenged, so static assets, [/metrics] and
     webhook POSTs pass through untouched.

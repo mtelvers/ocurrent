@@ -159,6 +159,22 @@ let respond_interstitial t request =
   (* 503 so crawlers/caches treat it as "not the content"; browsers still run the JS. *)
   Server.respond_string ~status:`Service_unavailable ~headers ~body ()
 
+(* The interstitial's own assets. Served by [handle] so that a bare server
+   (one not using [Site]'s crunch routes) can still present a solvable
+   challenge: the browser must be able to fetch these to run the solver. *)
+let assets =
+  [ "/js/challenge.js", "text/javascript; charset=utf-8";
+    "/css/challenge.css", "text/css; charset=utf-8" ]
+
+let respond_asset ~content_type body =
+  let headers =
+    Cohttp.Header.of_list
+      [ ("Content-Type", content_type);
+        ("Cache-Control", "public, max-age=86400") ]
+    |> Utils.add_security_headers
+  in
+  Server.respond_string ~status:`OK ~headers ~body ()
+
 let respond_verify t ~secure request =
   let uri = Cohttp.Request.uri request in
   let challenge = Uri.get_query_param uri "c" in
@@ -180,6 +196,10 @@ let respond_verify t ~secure request =
 
 let handle t ~secure request ~path ~meth =
   if path = verify_path then `Response (respond_verify t ~secure request)
+  else if meth = `GET && List.mem_assoc path assets then
+    (match Static.read path with
+     | Some body -> `Response (respond_asset ~content_type:(List.assoc path assets) body)
+     | None -> `Pass)
   else
     (* Challenge a GET when the client asks for HTML (a browser navigation) OR
        when the path is one the site marked as protected. The latter closes the
