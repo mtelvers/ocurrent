@@ -6,6 +6,7 @@ type t = {
   token_ttl : float;
   challenge_ttl : float;
   cookie_name : string;
+  protect : string -> bool;
 }
 
 (* The endpoint the interstitial's JavaScript calls once it has solved the
@@ -13,13 +14,13 @@ type t = {
 let verify_path = "/.ocurrent-challenge/verify"
 
 let v ?secret ?(difficulty = 16) ?(token_ttl = 604800.) ?(challenge_ttl = 600.)
-    ?(cookie_name = "__ocurrent_pow") () =
+    ?(cookie_name = "__ocurrent_pow") ?(protect = fun _ -> false) () =
   let secret =
     match secret with
     | Some s -> s
     | None -> Cstruct.to_string (Mirage_crypto_rng.generate 32)
   in
-  { secret; difficulty; token_ttl; challenge_ttl; cookie_name }
+  { secret; difficulty; token_ttl; challenge_ttl; cookie_name; protect }
 
 let hmac_hex t msg =
   Digestif.SHA256.hmac_string ~key:t.secret msg |> Digestif.SHA256.to_hex
@@ -180,13 +181,22 @@ let respond_verify t ~secure request =
 let handle t ~secure request ~path ~meth =
   if path = verify_path then `Response (respond_verify t ~secure request)
   else
-    let is_html_get =
+    (* Challenge a GET when the client asks for HTML (a browser navigation) OR
+       when the path is one the site marked as protected. The latter closes the
+       gap where a crawler sends [Accept: */*] (or no Accept) to an expensive
+       page and is served the full content without ever seeing the challenge:
+       [protect] gates by path, which the client cannot spoof away. Static
+       assets, [/metrics] and webhook POSTs still pass (not GET-html, not
+       protected), so the interstitial's own css/js load and the browser can
+       solve it. *)
+    let should_challenge =
       meth = `GET
-      && (match Cohttp.Header.get (Cohttp.Request.headers request) "accept" with
-          | Some a -> Astring.String.is_infix ~affix:"text/html" a
-          | None -> false)
+      && (t.protect path
+          || (match Cohttp.Header.get (Cohttp.Request.headers request) "accept" with
+              | Some a -> Astring.String.is_infix ~affix:"text/html" a
+              | None -> false))
     in
-    if not is_html_get then `Pass
+    if not should_challenge then `Pass
     else
       match get_cookie t request with
       | Some tok when valid_token t tok -> `Pass

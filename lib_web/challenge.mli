@@ -19,6 +19,7 @@ val v :
   ?token_ttl:float ->
   ?challenge_ttl:float ->
   ?cookie_name:string ->
+  ?protect:(string -> bool) ->
   unit -> t
 (** [v ()] is a challenge configuration.
     @param secret HMAC key for signing challenges and tokens. Defaults to 32
@@ -29,7 +30,13 @@ val v :
     @param token_ttl Lifetime of an issued token cookie, in seconds (default 1 week).
     @param challenge_ttl How long a freshly issued challenge may be solved for,
       in seconds (default 10 minutes).
-    @param cookie_name Name of the token cookie (default ["__ocurrent_pow"]). *)
+    @param cookie_name Name of the token cookie (default ["__ocurrent_pow"]).
+    @param protect Predicate on the request path. A [`GET] whose path satisfies
+      it is challenged regardless of the [Accept] header (default [fun _ ->
+      false], i.e. only [Accept: text/html] GETs are challenged). Use this to
+      protect expensive pages against crawlers that send [Accept: */*] to skip
+      the header check; e.g. [~protect:(String.starts_with ~prefix:"/job/")].
+      Keep it off asset/metrics paths so the interstitial can still load. *)
 
 val handle :
   t ->
@@ -42,6 +49,7 @@ val handle :
     It returns [`Response r] either to serve the interstitial (for an HTML page
     request lacking a valid token) or to handle the verification endpoint;
     otherwise [`Pass], meaning the request should be routed as normal. Only
-    [`GET] requests that accept [text/html] are ever challenged, so static
-    assets, [/metrics] and webhook POSTs pass through untouched.
+    [`GET] requests that either accept [text/html] or whose path matches the
+    [protect] predicate are ever challenged, so static assets, [/metrics] and
+    webhook POSTs pass through untouched.
     @param secure Whether to set the [Secure] attribute on the cookie. *)
