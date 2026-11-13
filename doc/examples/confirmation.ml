@@ -40,6 +40,8 @@ let show ~cache hash =
     let> key = hash in
     Show_cache.get cache Show.No_context key
 
+let () = Prometheus_reporter_unix.Logging.init ()
+
 (* The pipeline will execute these actions:
     1. Fetch a commit
     2. Wait for confirmation
@@ -55,10 +57,7 @@ let main mode repo =
     Eio_main.run @@ fun env ->
     Eio.Switch.run @@ fun sw ->
     let net = Eio.Stdenv.net env in
-    let clock = Eio.Stdenv.clock env in
     let process_mgr = Eio.Stdenv.process_mgr env in
-    Prometheus_unix.Logging.init ~clock ();
-    Prometheus_unix.init ~clock ();
     let repo = Git.Local.v ~sw ~process_mgr (Fpath.v repo) in
     let engine =
       Current.Engine.create ~sw ~env ~config (fun engine ->

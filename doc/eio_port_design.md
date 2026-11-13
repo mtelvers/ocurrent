@@ -224,6 +224,15 @@ else uses `Current.Process.exec ~job`.
 
 ## Sibling work: `prometheus-eio`
 
+> **Outcome (November 2026):** landed upstream as prometheus 2.0. The core
+> `prometheus` package is Lwt-free with a synchronous `collect`;
+> `prometheus-reporter` holds the text format and `Logs` reporter;
+> `prometheus-eio` provides a cohttp-eio callback. Upstream did not take
+> the cmdliner + server part (step 5 below), so OCurrent 2.0 depends on
+> `prometheus` + `prometheus-reporter`. Pipelines are scraped via
+> `Current_web`'s `/metrics`, so they don't need a separate listener.
+> The plan below is kept as the historical record.
+
 Spike an Eio fork of `mirage/prometheus` as part of the 2.0 work, rather than
 vendoring the text formatter or bridging via `Lwt.state` tricks.
 

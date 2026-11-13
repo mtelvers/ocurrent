@@ -160,7 +160,7 @@ let test_case_gc env name fn =
     Gc.full_major ();
     Alcotest.(check int) "No errors logged" 0 @@ Logs.err_count () - old_errors;
     let data = Prometheus.CollectorRegistry.(collect default) in
-    Fmt.to_to_string Prometheus_app.TextFormat_0_0_4.output data
+    Fmt.to_to_string Prometheus_reporter.TextFormat_0_0_4.output data
     |> String.split_on_char '\n'
     |> List.iter (fun line ->
         if Astring.String.is_prefix ~affix:"ocurrent_cache_memory_cache_items{" line then (

@@ -33,7 +33,7 @@
   multipart_form
   ppx_sexp_conv.runtime-lib
   prometheus
-  prometheus-app
+  prometheus-reporter
   re
   result
   routes

@@ -38,7 +38,7 @@
   fmt.tty
   fpath
   logs.fmt
-  prometheus-app.unix
+  prometheus-reporter.unix
   result
   routes
   uri

@@ -23,7 +23,7 @@
   logs.fmt
   result
   prometheus
-  prometheus-app
+  prometheus-reporter
   ppx_deriving.runtime))
 
 (executable

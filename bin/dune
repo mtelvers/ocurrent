@@ -11,4 +11,4 @@
   eio
   eio_main
   fmt
-  prometheus-app.unix))
+  prometheus-reporter.unix))

@@ -1,5 +1,7 @@
 (** ocurrent-ctl - CLI tool for controlling OCurrent pipelines via RPC *)
 
+let () = Prometheus_reporter_unix.Logging.init ~default_level:Logs.Warning ()
+
 let to_msg_error = function
   | Ok x -> Ok x
   | Error `Capnp ex -> Error (`Msg (Fmt.to_to_string Capnp_rpc.Error.pp ex))
@@ -402,7 +404,4 @@ let main_cmd env =
 
 let () =
   Eio_main.run @@ fun env ->
-  let clock = Eio.Stdenv.clock env in
-  Prometheus_unix.Logging.init ~clock () ~default_level:Logs.Warning;
-  Prometheus_unix.init ~clock ();
   exit @@ Cmd.eval (main_cmd env)

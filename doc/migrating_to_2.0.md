@@ -17,11 +17,8 @@ real downstream consumer (`ocurrent-deployer`).
 1. **OCaml 5.0 or later.** Eio requires effects, which arrived in OCaml
    5.0. Bump the floor in your `dune-project` if you had OCaml 4.x.
 2. **A recent `opam-repository`.** OCurrent 2.0 depends on capnp-rpc
-   2.x and mirage-crypto 1.x; older repository snapshots will fail to
-   resolve. Pull the latest before starting.
-3. **A `prometheus-eio` source.** Until the Eio rewrite of
-   `mirage/prometheus` lands upstream, OCurrent depends on a fork at
-   `https://github.com/mtelvers/prometheus.git#eio`.
+   2.x, mirage-crypto 1.x and prometheus 2.0; older repository snapshots
+   will fail to resolve. Pull the latest before starting.
 
 ## Setting up the switch
 
@@ -30,8 +27,6 @@ local switch. From your project root:
 
 ```sh
 opam switch create . 5.4.1 --no-install
-opam pin add -yn prometheus.dev      https://github.com/mtelvers/prometheus.git#eio
-opam pin add -yn prometheus-app.dev  https://github.com/mtelvers/prometheus.git#eio
 opam pin add -yn current.dev         https://github.com/ocurrent/ocurrent.git#eio
 opam pin add -yn current_term.dev    https://github.com/ocurrent/ocurrent.git#eio
 opam pin add -yn current_web.dev     https://github.com/ocurrent/ocurrent.git#eio
@@ -104,7 +99,7 @@ open.
 The minimal 2.0 ladder is:
 
 ```ocaml
-let main () config mode prometheus_config =
+let main () config mode =
   Eio_main.run @@ fun env ->
   Eio.Switch.run @@ fun sw ->
   let net = Eio.Stdenv.net env in
@@ -116,8 +111,7 @@ let main () config mode prometheus_config =
       pipeline …)
   in
   let site = Current_web.Site.v ~has_role ~name:"…" routes in
-  Eio.Fiber.all
-    (Current_web.run ~net ~mode site :: Prometheus_unix.serve ~net prometheus_config)
+  Current_web.run ~net ~mode site ()
 ```
 
 The order matters:
@@ -129,12 +123,11 @@ The order matters:
   instances built inside can call `Current_cache.caps_of_engine` to
   derive a `caps` record (used to instantiate caches — see *Plugin
   instance creation* below).
-- `Current_web.run` and `Prometheus_unix.serve` both return fiber
-  bodies (`unit -> unit` and `(unit -> unit) list` respectively) rather
-  than blocking. Compose them with `Eio.Fiber.all`. Each owns its
-  listening socket via an internal switch; cancelling a fiber shuts
-  that server down. Exiting `Eio.Fiber.all` then exits `Switch.run`,
-  which tears down the engine daemon.
+- `Current_web.run` returns a fiber body (`unit -> unit`) rather than
+  blocking: apply it to `()` as above, or compose it with other
+  servers using `Eio.Fiber.all`. It owns its listening socket via an
+  internal switch; cancelling the fiber shuts the server down. When it
+  returns, `Switch.run` exits and tears down the engine daemon.
 - `Current_web.run` now takes `~net` explicitly (was implicit via
   global state in pre-2.0 betas).
 
@@ -311,8 +304,9 @@ fibers or spawn subprocesses scoped to the job.
 
 The engine runs as an Eio daemon on the switch passed to
 `Engine.create ~sw`. There is no thread to compose with `Lwt.choose`.
-The web server and Prometheus server now return fiber bodies; compose
-them with `Eio.Fiber.all`:
+The web server is now a fiber body. A separate Prometheus server is
+no longer needed: `Current_web` serves the metrics at `/metrics` (see
+[Prometheus](#prometheus)):
 
 ```ocaml
 (* before *)
@@ -323,9 +317,44 @@ Lwt.choose [
 ]
 
 (* after *)
-Eio.Fiber.all
-  (Current_web.run ~net ~mode site :: Prometheus_unix.serve ~net config)
+Current_web.run ~net ~mode site ()
 ```
+
+### Prometheus
+
+OCurrent 2.0 uses prometheus 2.0, which split the old `prometheus-app`
+so that an Eio application links no Lwt or cohttp-lwt code:
+
+| 1.x | 2.0 |
+|---|---|
+| `prometheus-app` (`Prometheus_app.TextFormat_0_0_4`) | `prometheus-reporter` (`Prometheus_reporter.TextFormat_0_0_4`) |
+| `prometheus-app.unix` (`Prometheus_unix.Logging.init`) | `prometheus-reporter.unix` (`Prometheus_reporter_unix.Logging.init`) |
+
+`Prometheus.CollectorRegistry.collect` is now synchronous. Collectors
+registered through the core are sync; `Prometheus_lwt` is the only
+home for Lwt collectors, and an Eio pipeline should not need it.
+
+`Prometheus_reporter_unix.Logging.init` is a drop-in rename and can
+stay at the top level:
+
+```ocaml
+(* before *)
+let () = Prometheus_unix.Logging.init ()
+
+(* after *)
+let () = Prometheus_reporter_unix.Logging.init ()
+```
+
+`Prometheus_unix.opts` and `Prometheus_unix.serve` have no Eio
+replacement, and a pipeline doesn't need one: `Current_web` serves the
+default registry at `/metrics`, gated on the `Monitor` role, and
+refreshes the engine's gauges before each scrape. Remove the
+`--listen-prometheus` option and point Prometheus at the web UI
+instead.
+
+A process that doesn't run `Current_web` (a separate web frontend, for
+example) can serve its metrics with `Prometheus_eio.callback` from the
+`prometheus-eio` package, a cohttp-eio handler for `/metrics`.
 
 ### `Lwt.finalize` → `Fun.protect`
 
@@ -389,6 +418,10 @@ executable's libs). The library that contains plugin definitions
 generally needs `eio` for `Eio.Switch`/`Eio.Promise`/`Eio.Condition`
 references; the executable additionally needs `eio_main` to call
 `Eio_main.run`.
+
+Replace `prometheus-app` with `prometheus-reporter` and
+`prometheus-app.unix` with `prometheus-reporter.unix` (see
+[Prometheus](#prometheus)).
 
 ### Tests using Alcotest
 
